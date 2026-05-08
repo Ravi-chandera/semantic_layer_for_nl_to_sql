@@ -1,0 +1,1196 @@
+{
+    "tables": [
+        {
+            "table_name": "approval_matrix",
+            "columns": [
+                {
+                    "name": "id",
+                    "type": "INTEGER",
+                    "is_part_of_pk": true,
+                    "sample_values": [
+                        1,
+                        2,
+                        3
+                    ]
+                },
+                {
+                    "name": "min_amount",
+                    "type": "DECIMAL(15,2)",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        0,
+                        100001,
+                        1000001
+                    ]
+                },
+                {
+                    "name": "max_amount",
+                    "type": "DECIMAL(15,2)",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        100000,
+                        1000000,
+                        5000000
+                    ]
+                },
+                {
+                    "name": "approver_role",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "Auto",
+                        "Department Head",
+                        "Finance Controller"
+                    ]
+                },
+                {
+                    "name": "approver_name",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "System",
+                        "Respective HOD",
+                        "Manish Gupta"
+                    ]
+                },
+                {
+                    "name": "approver_email",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "system@cashflo.io",
+                        "hod@cashflo.io",
+                        "manish.gupta@cashflo.io"
+                    ]
+                }
+            ],
+            "primary_keys": [
+                "id"
+            ],
+            "foreign_keys": []
+        },
+        {
+            "table_name": "companies",
+            "columns": [
+                {
+                    "name": "id",
+                    "type": "INTEGER",
+                    "is_part_of_pk": true,
+                    "sample_values": [
+                        1,
+                        2
+                    ]
+                },
+                {
+                    "name": "name",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "Cashflo Technologies Pvt Ltd",
+                        "Cashflo Financial Services Ltd"
+                    ]
+                },
+                {
+                    "name": "gstin",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "27AABCC1234F1Z5",
+                        "29AABCC5678G1Z3"
+                    ]
+                },
+                {
+                    "name": "pan",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "AABCC1234F",
+                        "AABCC5678G"
+                    ]
+                },
+                {
+                    "name": "state_code",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "27",
+                        "29"
+                    ]
+                },
+                {
+                    "name": "city",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "Mumbai",
+                        "Bangalore"
+                    ]
+                },
+                {
+                    "name": "is_buyer",
+                    "type": "INTEGER",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        1
+                    ]
+                }
+            ],
+            "primary_keys": [
+                "id"
+            ],
+            "foreign_keys": []
+        },
+        {
+            "table_name": "departments",
+            "columns": [
+                {
+                    "name": "id",
+                    "type": "INTEGER",
+                    "is_part_of_pk": true,
+                    "sample_values": [
+                        1,
+                        2,
+                        3
+                    ]
+                },
+                {
+                    "name": "company_id",
+                    "type": "INTEGER",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        1,
+                        2
+                    ]
+                },
+                {
+                    "name": "name",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "Engineering",
+                        "Operations",
+                        "Marketing"
+                    ]
+                },
+                {
+                    "name": "head_name",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "Rahul Sharma",
+                        "Priya Menon",
+                        "Aditya Patel"
+                    ]
+                },
+                {
+                    "name": "head_email",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "rahul.sharma@cashflo.io",
+                        "priya.menon@cashflo.io",
+                        "aditya.patel@cashflo.io"
+                    ]
+                },
+                {
+                    "name": "budget_annual",
+                    "type": "DECIMAL(15,2)",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        5000000,
+                        3000000,
+                        2000000
+                    ]
+                }
+            ],
+            "primary_keys": [
+                "id"
+            ],
+            "foreign_keys": [
+                {
+                    "column": "company_id",
+                    "references_table": "companies",
+                    "references_column": "id"
+                }
+            ]
+        },
+        {
+            "table_name": "grn_line_items",
+            "columns": [
+                {
+                    "name": "id",
+                    "type": "INTEGER",
+                    "is_part_of_pk": true,
+                    "sample_values": [
+                        1,
+                        2,
+                        3
+                    ]
+                },
+                {
+                    "name": "grn_id",
+                    "type": "INTEGER",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        1,
+                        2,
+                        3
+                    ]
+                },
+                {
+                    "name": "product_id",
+                    "type": "INTEGER",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        1,
+                        4,
+                        12
+                    ]
+                },
+                {
+                    "name": "po_line_item_id",
+                    "type": "INTEGER",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        1,
+                        2,
+                        3
+                    ]
+                },
+                {
+                    "name": "quantity_received",
+                    "type": "DECIMAL(10,2)",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        20,
+                        2,
+                        10
+                    ]
+                },
+                {
+                    "name": "quantity_rejected",
+                    "type": "DECIMAL(10,2)",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
+                {
+                    "name": "remarks",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": []
+                }
+            ],
+            "primary_keys": [
+                "id"
+            ],
+            "foreign_keys": [
+                {
+                    "column": "po_line_item_id",
+                    "references_table": "po_line_items",
+                    "references_column": "id"
+                },
+                {
+                    "column": "product_id",
+                    "references_table": "products",
+                    "references_column": "id"
+                },
+                {
+                    "column": "grn_id",
+                    "references_table": "grns",
+                    "references_column": "id"
+                }
+            ]
+        },
+        {
+            "table_name": "grns",
+            "columns": [
+                {
+                    "name": "id",
+                    "type": "INTEGER",
+                    "is_part_of_pk": true,
+                    "sample_values": [
+                        1,
+                        2,
+                        3
+                    ]
+                },
+                {
+                    "name": "grn_number",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "GRN-2025-0001",
+                        "GRN-2025-0002",
+                        "GRN-2025-0003"
+                    ]
+                },
+                {
+                    "name": "po_id",
+                    "type": "INTEGER",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        1,
+                        2,
+                        3
+                    ]
+                },
+                {
+                    "name": "vendor_id",
+                    "type": "INTEGER",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        8,
+                        3,
+                        9
+                    ]
+                },
+                {
+                    "name": "grn_date",
+                    "type": "DATE",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "2025-08-14",
+                        "2025-05-19",
+                        "2026-01-06"
+                    ]
+                },
+                {
+                    "name": "received_by",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "Receiving Clerk",
+                        "Warehouse Team",
+                        "Ops Manager"
+                    ]
+                },
+                {
+                    "name": "status",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "confirmed",
+                        "partial"
+                    ]
+                }
+            ],
+            "primary_keys": [
+                "id"
+            ],
+            "foreign_keys": [
+                {
+                    "column": "vendor_id",
+                    "references_table": "vendors",
+                    "references_column": "id"
+                },
+                {
+                    "column": "po_id",
+                    "references_table": "purchase_orders",
+                    "references_column": "id"
+                }
+            ]
+        },
+        {
+            "table_name": "invoice_line_items",
+            "columns": [
+                {
+                    "name": "id",
+                    "type": "INTEGER",
+                    "is_part_of_pk": true,
+                    "sample_values": [
+                        1,
+                        2,
+                        3
+                    ]
+                },
+                {
+                    "name": "invoice_id",
+                    "type": "INTEGER",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        1,
+                        2,
+                        3
+                    ]
+                },
+                {
+                    "name": "product_id",
+                    "type": "INTEGER",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        1,
+                        4,
+                        12
+                    ]
+                },
+                {
+                    "name": "description",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": []
+                },
+                {
+                    "name": "hsn_code",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "882209.6",
+                        "41456.64",
+                        "16965.4"
+                    ]
+                },
+                {
+                    "name": "quantity",
+                    "type": "DECIMAL(10,2)",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        13.51,
+                        1.88,
+                        10.8
+                    ]
+                },
+                {
+                    "name": "unit_rate",
+                    "type": "DECIMAL(12,2)",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        44110.48,
+                        20728.32,
+                        848.27
+                    ]
+                },
+                {
+                    "name": "total_amount",
+                    "type": "DECIMAL(15,2)",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        595932.58,
+                        38969.24,
+                        9161.32
+                    ]
+                },
+                {
+                    "name": "cgst",
+                    "type": "DECIMAL(10,2)",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        53633.93,
+                        3507.23,
+                        824.52
+                    ]
+                },
+                {
+                    "name": "sgst",
+                    "type": "DECIMAL(10,2)",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        53633.93,
+                        3507.23,
+                        824.52
+                    ]
+                },
+                {
+                    "name": "igst",
+                    "type": "DECIMAL(10,2)",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        0,
+                        8863.15,
+                        9327.08
+                    ]
+                }
+            ],
+            "primary_keys": [
+                "id"
+            ],
+            "foreign_keys": [
+                {
+                    "column": "product_id",
+                    "references_table": "products",
+                    "references_column": "id"
+                },
+                {
+                    "column": "invoice_id",
+                    "references_table": "invoices",
+                    "references_column": "id"
+                }
+            ]
+        },
+        {
+            "table_name": "invoices",
+            "columns": [
+                {
+                    "name": "id",
+                    "type": "INTEGER",
+                    "is_part_of_pk": true,
+                    "sample_values": [
+                        1,
+                        2,
+                        3
+                    ]
+                },
+                {
+                    "name": "invoice_number",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "INV-08-00001",
+                        "INV-03-00002",
+                        "INV-03-00003"
+                    ]
+                },
+                {
+                    "name": "vendor_id",
+                    "type": "INTEGER",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        8,
+                        3,
+                        9
+                    ]
+                },
+                {
+                    "name": "company_id",
+                    "type": "INTEGER",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        2,
+                        1
+                    ]
+                },
+                {
+                    "name": "po_id",
+                    "type": "INTEGER",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        1,
+                        2,
+                        3
+                    ]
+                },
+                {
+                    "name": "invoice_date",
+                    "type": "DATE",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "2025-09-04",
+                        "2025-05-29",
+                        "2025-06-17"
+                    ]
+                },
+                {
+                    "name": "due_date",
+                    "type": "DATE",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "2025-11-03",
+                        "2025-06-28",
+                        "2025-08-01"
+                    ]
+                },
+                {
+                    "name": "total_taxable_amount",
+                    "type": "DECIMAL(15,2)",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        644063.14,
+                        748829.45,
+                        418778.81
+                    ]
+                },
+                {
+                    "name": "total_tax",
+                    "type": "DECIMAL(15,2)",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        115931.37,
+                        134789.3,
+                        75380.19
+                    ]
+                },
+                {
+                    "name": "grand_total",
+                    "type": "DECIMAL(15,2)",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        759994.51,
+                        883618.75,
+                        494159
+                    ]
+                },
+                {
+                    "name": "currency",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "INR"
+                    ]
+                },
+                {
+                    "name": "status",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "validated",
+                        "approved",
+                        "paid"
+                    ]
+                },
+                {
+                    "name": "deviation_type",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "Rate Mismatch",
+                        "Missing GRN",
+                        "Amount Mismatch > 10%"
+                    ]
+                },
+                {
+                    "name": "deviation_details",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "Unit rate on one or more line items differs from PO rate by >2%",
+                        "No GRN found for referenced PO",
+                        "Invoice total 239604.4 exceeds PO total 202231.94 by more than 10%"
+                    ]
+                },
+                {
+                    "name": "approved_by",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "Department Head",
+                        "Finance Controller",
+                        "CFO"
+                    ]
+                },
+                {
+                    "name": "approval_date",
+                    "type": "DATE",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "2025-06-19",
+                        "2026-01-11",
+                        "2026-01-30"
+                    ]
+                },
+                {
+                    "name": "created_at",
+                    "type": "TIMESTAMP",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "2025-09-04 00:00:00",
+                        "2025-05-29 00:00:00",
+                        "2025-06-17 00:00:00"
+                    ]
+                }
+            ],
+            "primary_keys": [
+                "id"
+            ],
+            "foreign_keys": [
+                {
+                    "column": "po_id",
+                    "references_table": "purchase_orders",
+                    "references_column": "id"
+                },
+                {
+                    "column": "company_id",
+                    "references_table": "companies",
+                    "references_column": "id"
+                },
+                {
+                    "column": "vendor_id",
+                    "references_table": "vendors",
+                    "references_column": "id"
+                }
+            ]
+        },
+        {
+            "table_name": "payments",
+            "columns": [
+                {
+                    "name": "id",
+                    "type": "INTEGER",
+                    "is_part_of_pk": true,
+                    "sample_values": [
+                        1,
+                        2,
+                        3
+                    ]
+                },
+                {
+                    "name": "invoice_id",
+                    "type": "INTEGER",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        4,
+                        5,
+                        11
+                    ]
+                },
+                {
+                    "name": "payment_date",
+                    "type": "DATE",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "2026-02-06",
+                        "2026-03-12",
+                        "2025-09-11"
+                    ]
+                },
+                {
+                    "name": "amount",
+                    "type": "DECIMAL(15,2)",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        2942010.34,
+                        752963.99,
+                        534274.74
+                    ]
+                },
+                {
+                    "name": "payment_mode",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "RTGS",
+                        "NEFT",
+                        "UPI"
+                    ]
+                },
+                {
+                    "name": "reference_number",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "TXN946721",
+                        "TXN246991",
+                        "TXN143860"
+                    ]
+                },
+                {
+                    "name": "bank_account",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "HDFC-XXXX1234"
+                    ]
+                }
+            ],
+            "primary_keys": [
+                "id"
+            ],
+            "foreign_keys": [
+                {
+                    "column": "invoice_id",
+                    "references_table": "invoices",
+                    "references_column": "id"
+                }
+            ]
+        },
+        {
+            "table_name": "po_line_items",
+            "columns": [
+                {
+                    "name": "id",
+                    "type": "INTEGER",
+                    "is_part_of_pk": true,
+                    "sample_values": [
+                        1,
+                        2,
+                        3
+                    ]
+                },
+                {
+                    "name": "po_id",
+                    "type": "INTEGER",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        1,
+                        2,
+                        3
+                    ]
+                },
+                {
+                    "name": "product_id",
+                    "type": "INTEGER",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        1,
+                        4,
+                        12
+                    ]
+                },
+                {
+                    "name": "quantity",
+                    "type": "DECIMAL(10,2)",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        20,
+                        2,
+                        10
+                    ]
+                },
+                {
+                    "name": "unit_rate",
+                    "type": "DECIMAL(12,2)",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        44110.48,
+                        20728.32,
+                        848.27
+                    ]
+                },
+                {
+                    "name": "total_amount",
+                    "type": "DECIMAL(15,2)",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        882209.6,
+                        41456.64,
+                        16965.4
+                    ]
+                },
+                {
+                    "name": "tax_rate",
+                    "type": "DECIMAL(5,2)",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        18
+                    ]
+                }
+            ],
+            "primary_keys": [
+                "id"
+            ],
+            "foreign_keys": [
+                {
+                    "column": "product_id",
+                    "references_table": "products",
+                    "references_column": "id"
+                },
+                {
+                    "column": "po_id",
+                    "references_table": "purchase_orders",
+                    "references_column": "id"
+                }
+            ]
+        },
+        {
+            "table_name": "products",
+            "columns": [
+                {
+                    "name": "id",
+                    "type": "INTEGER",
+                    "is_part_of_pk": true,
+                    "sample_values": [
+                        12,
+                        10,
+                        8
+                    ]
+                },
+                {
+                    "name": "code",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "CHM-001",
+                        "CON-001",
+                        "FAC-001"
+                    ]
+                },
+                {
+                    "name": "name",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "Cloud Hosting - Monthly",
+                        "Software License - Annual",
+                        "Laptop - Business"
+                    ]
+                },
+                {
+                    "name": "category",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "IT Services",
+                        "Hardware",
+                        "Stationery"
+                    ]
+                },
+                {
+                    "name": "hsn_code",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "998314",
+                        "998316",
+                        "847130"
+                    ]
+                },
+                {
+                    "name": "unit",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "MOS",
+                        "NOS",
+                        "PKT"
+                    ]
+                },
+                {
+                    "name": "standard_rate",
+                    "type": "DECIMAL(12,2)",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        45000,
+                        120000,
+                        75000
+                    ]
+                }
+            ],
+            "primary_keys": [
+                "id"
+            ],
+            "foreign_keys": []
+        },
+        {
+            "table_name": "purchase_orders",
+            "columns": [
+                {
+                    "name": "id",
+                    "type": "INTEGER",
+                    "is_part_of_pk": true,
+                    "sample_values": [
+                        1,
+                        2,
+                        3
+                    ]
+                },
+                {
+                    "name": "po_number",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "PO-2025-0001",
+                        "PO-2025-0002",
+                        "PO-2025-0003"
+                    ]
+                },
+                {
+                    "name": "company_id",
+                    "type": "INTEGER",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        2,
+                        1
+                    ]
+                },
+                {
+                    "name": "vendor_id",
+                    "type": "INTEGER",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        8,
+                        3,
+                        9
+                    ]
+                },
+                {
+                    "name": "department_id",
+                    "type": "INTEGER",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        3,
+                        4,
+                        5
+                    ]
+                },
+                {
+                    "name": "po_date",
+                    "type": "DATE",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "2025-07-22",
+                        "2025-05-03",
+                        "2025-12-27"
+                    ]
+                },
+                {
+                    "name": "total_amount",
+                    "type": "DECIMAL(15,2)",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        940631.64,
+                        748829.45,
+                        2493229.1
+                    ]
+                },
+                {
+                    "name": "status",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "partially_received",
+                        "approved",
+                        "closed"
+                    ]
+                },
+                {
+                    "name": "approved_by",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "System"
+                    ]
+                },
+                {
+                    "name": "created_at",
+                    "type": "TIMESTAMP",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "2025-07-22 00:00:00",
+                        "2025-05-03 00:00:00",
+                        "2025-12-27 00:00:00"
+                    ]
+                }
+            ],
+            "primary_keys": [
+                "id"
+            ],
+            "foreign_keys": [
+                {
+                    "column": "department_id",
+                    "references_table": "departments",
+                    "references_column": "id"
+                },
+                {
+                    "column": "vendor_id",
+                    "references_table": "vendors",
+                    "references_column": "id"
+                },
+                {
+                    "column": "company_id",
+                    "references_table": "companies",
+                    "references_column": "id"
+                }
+            ]
+        },
+        {
+            "table_name": "vendors",
+            "columns": [
+                {
+                    "name": "id",
+                    "type": "INTEGER",
+                    "is_part_of_pk": true,
+                    "sample_values": [
+                        1,
+                        2,
+                        3
+                    ]
+                },
+                {
+                    "name": "name",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "TechServe Solutions Pvt Ltd",
+                        "CloudNet Infra",
+                        "PrintMax Stationery"
+                    ]
+                },
+                {
+                    "name": "gstin",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "36AAPA0371A1Z2",
+                        "29ABPB1482B1Z3",
+                        "27ACPC2593C1Z7"
+                    ]
+                },
+                {
+                    "name": "pan",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "AAPA0371A",
+                        "ABPB1482B",
+                        "ACPC2593C"
+                    ]
+                },
+                {
+                    "name": "state_code",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "36",
+                        "29",
+                        "27"
+                    ]
+                },
+                {
+                    "name": "city",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "Delhi",
+                        "Bangalore",
+                        "Mumbai"
+                    ]
+                },
+                {
+                    "name": "payment_terms_days",
+                    "type": "INTEGER",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        30,
+                        60,
+                        45
+                    ]
+                },
+                {
+                    "name": "is_watchlist",
+                    "type": "INTEGER",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        0,
+                        1
+                    ]
+                },
+                {
+                    "name": "rating",
+                    "type": "TEXT",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "A",
+                        "C",
+                        "B"
+                    ]
+                },
+                {
+                    "name": "onboarded_date",
+                    "type": "DATE",
+                    "is_part_of_pk": false,
+                    "sample_values": [
+                        "2024-01-15",
+                        "2023-02-22",
+                        "2023-01-16"
+                    ]
+                }
+            ],
+            "primary_keys": [
+                "id"
+            ],
+            "foreign_keys": []
+        }
+    ]
+}
