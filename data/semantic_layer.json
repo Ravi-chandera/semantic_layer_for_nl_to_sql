@@ -1,0 +1,690 @@
+{
+"tables": {
+"approval_matrix": {
+"description": "Defines the hierarchy of approval based on monetary thresholds, mapping amount ranges to specific roles and individuals.",
+"synonyms": ["authorization levels", "approval thresholds", "signing limits"],
+"business_context": "Used to verify which person or role is required to approve an invoice or purchase order of a specific value.",
+"primary_key": "id",
+"columns": {
+"id": {
+"type": "INTEGER",
+"description": "Unique identifier for the approval rule.",
+"synonyms": [],
+"is_filterable": true,
+"is_metric": false
+},
+"min_amount": {
+"type": "DECIMAL(15,2)",
+"description": "The lower bound of the amount range for this approval level.",
+"synonyms": ["floor amount"],
+"is_filterable": true,
+"is_metric": true
+},
+"max_amount": {
+"type": "DECIMAL(15,2)",
+"description": "The upper bound of the amount range for this approval level.",
+"synonyms": ["ceiling amount"],
+"is_filterable": true,
+"is_metric": true
+},
+"approver_role": {
+"type": "TEXT",
+"description": "The job title or role responsible for approval at this level.",
+"synonyms": ["designation"],
+"is_filterable": true,
+"is_metric": false,
+"enum_values": {
+"Auto": "System-generated automatic approval",
+"Department Head": "Head of the requesting department",
+"Finance Controller": "Finance leadership oversight"
+}
+},
+"approver_name": {
+"type": "TEXT",
+"description": "The specific name of the person authorized to approve.",
+"synonyms": ["authorizer"],
+"is_filterable": true,
+"is_metric": false
+},
+"approver_email": {
+"type": "TEXT",
+"description": "Contact email of the authorized approver.",
+"synonyms": [],
+"is_filterable": true,
+"is_metric": false
+}
+},
+"relationships": []
+},
+"companies": {
+"description": "Internal legal entities or branch offices belonging to the parent organization.",
+"synonyms": ["entities", "subsidiaries", "legal entities"],
+"business_context": "Identifies which internal company is the purchaser or the owner of a transaction.",
+"primary_key": "id",
+"columns": {
+"id": {
+"type": "INTEGER",
+"description": "Unique identifier for the company.",
+"synonyms": [],
+"is_filterable": true,
+"is_metric": false
+},
+"name": {
+"type": "TEXT",
+"description": "Registered legal name of the entity.",
+"synonyms": ["company name"],
+"is_filterable": true,
+"is_metric": false
+},
+"gstin": {
+"type": "TEXT",
+"description": "Goods and Services Tax Identification Number.",
+"synonyms": ["tax id", "registration number"],
+"is_filterable": true,
+"is_metric": false
+},
+"state_code": {
+"type": "TEXT",
+"description": "Standard numerical code for the state of registration.",
+"synonyms": ["region code"],
+"is_filterable": true,
+"is_metric": false
+},
+"is_buyer": {
+"type": "INTEGER",
+"description": "Flag indicating if this entity acts as a purchasing unit.",
+"synonyms": ["purchasing entity"],
+"is_filterable": true,
+"is_metric": false,
+"enum_values": {
+"1": "Active buyer entity",
+"0": "Non-buying entity"
+}
+}
+},
+"relationships": []
+},
+"departments": {
+"description": "Functional units within a company responsible for specific business operations.",
+"synonyms": ["cost centers", "business units", "functions"],
+"business_context": "Used to track spending, budgets, and ownership of purchase orders by specific teams.",
+"primary_key": "id",
+"columns": {
+"id": {
+"type": "INTEGER",
+"description": "Unique identifier for the department.",
+"synonyms": [],
+"is_filterable": true,
+"is_metric": false
+},
+"company_id": {
+"type": "INTEGER",
+"description": "The ID of the company this department belongs to.",
+"synonyms": [],
+"is_filterable": true,
+"is_metric": false
+},
+"name": {
+"type": "TEXT",
+"description": "Name of the department (e.g., Engineering, Marketing).",
+"synonyms": ["dept name"],
+"is_filterable": true,
+"is_metric": false
+},
+"head_name": {
+"type": "TEXT",
+"description": "Name of the person leading the department.",
+"synonyms": ["manager", "hod"],
+"is_filterable": true,
+"is_metric": false
+},
+"budget_annual": {
+"type": "DECIMAL(15,2)",
+"description": "Total allocated spending limit for the department for the year.",
+"synonyms": ["yearly budget", "allocation"],
+"is_filterable": true,
+"is_metric": true
+}
+},
+"relationships": [
+{
+"target_table": "companies",
+"join_condition": "departments.company_id = companies.id",
+"join_type": "many_to_one",
+"description": "Links a department to its parent company entity."
+}
+]
+},
+"grn_line_items": {
+"description": "Detailed line-by-line records of specific products received in a Good Receipt Note.",
+"synonyms": ["receipt items", "delivery lines"],
+"business_context": "Used to check for quantity discrepancies between what was ordered and what was actually delivered.",
+"primary_key": "id",
+"columns": {
+"quantity_received": {
+"type": "DECIMAL(10,2)",
+"description": "The amount of product actually accepted into the warehouse.",
+"synonyms": ["accepted qty"],
+"is_filterable": true,
+"is_metric": true
+},
+"quantity_rejected": {
+"type": "DECIMAL(10,2)",
+"description": "The amount of product returned due to damage or quality issues.",
+"synonyms": ["damaged qty", "returned qty"],
+"is_filterable": true,
+"is_metric": true
+}
+},
+"relationships": [
+{
+"target_table": "grns",
+"join_condition": "grn_line_items.grn_id = grns.id",
+"join_type": "many_to_one",
+"description": "Links the line item to the main GRN header."
+},
+{
+"target_table": "products",
+"join_condition": "grn_line_items.product_id = products.id",
+"join_type": "many_to_one",
+"description": "Identifies the specific product being received."
+},
+{
+"target_table": "po_line_items",
+"join_condition": "grn_line_items.po_line_item_id = po_line_items.id",
+"join_type": "many_to_one",
+"description": "Maps the received quantity back to the original order line for reconciliation."
+}
+]
+},
+"grns": {
+"description": "Goods Receipt Notes (GRN) representing the official acknowledgement of goods received from a vendor.",
+"synonyms": ["receipts", "delivery notes"],
+"business_context": "A critical step in the 'Three-Way Match' (PO vs GRN vs Invoice) to ensure the company only pays for what it received.",
+"primary_key": "id",
+"columns": {
+"grn_number": {
+"type": "TEXT",
+"description": "Unique document number for the receipt.",
+"synonyms": ["receipt number"],
+"is_filterable": true,
+"is_metric": false
+},
+"grn_date": {
+"type": "DATE",
+"description": "The date when the goods were delivered and processed.",
+"synonyms": ["delivery date", "receipt date"],
+"is_filterable": true,
+"is_metric": false
+},
+"status": {
+"type": "TEXT",
+"description": "The current state of the receipt processing.",
+"synonyms": ["receipt status"],
+"is_filterable": true,
+"is_metric": false,
+"enum_values": {
+"confirmed": "Successfully received and documented",
+"partial": "Incomplete delivery received"
+}
+}
+},
+"relationships": [
+{
+"target_table": "vendors",
+"join_condition": "grns.vendor_id = vendors.id",
+"join_type": "many_to_one",
+"description": "Identifies the supplier who delivered the goods."
+},
+{
+"target_table": "purchase_orders",
+"join_condition": "grns.po_id = purchase_orders.id",
+"join_type": "many_to_one",
+"description": "Links the receipt to the specific purchase order it fulfills."
+}
+]
+},
+"invoice_line_items": {
+"description": "Specific line items listed on a vendor's invoice.",
+"synonyms": ["bill lines", "invoice details"],
+"business_context": "Used to audit individual charges, tax breakdowns (GST), and unit rates on a bill.",
+"primary_key": "id",
+"columns": {
+"total_amount": {
+"type": "DECIMAL(15,2)",
+"description": "The taxable value of this line item before tax.",
+"synonyms": ["base value", "net amount"],
+"is_filterable": true,
+"is_metric": true
+},
+"cgst": {
+"type": "DECIMAL(10,2)",
+"description": "Central Goods and Services Tax amount.",
+"is_filterable": false,
+"is_metric": true
+},
+"sgst": {
+"type": "DECIMAL(10,2)",
+"description": "State Goods and Services Tax amount.",
+"is_filterable": false,
+"is_metric": true
+},
+"igst": {
+"type": "DECIMAL(10,2)",
+"description": "Integrated Goods and Services Tax amount (used for inter-state trades).",
+"is_filterable": false,
+"is_metric": true
+}
+},
+"relationships": [
+{
+"target_table": "invoices",
+"join_condition": "invoice_line_items.invoice_id = invoices.id",
+"join_type": "many_to_one",
+"description": "Links the item to the parent invoice header."
+},
+{
+"target_table": "products",
+"join_condition": "invoice_line_items.product_id = products.id",
+"join_type": "many_to_one",
+"description": "Links the line to a specific product catalog entry."
+}
+]
+},
+"invoices": {
+"description": "Vendor-issued bills requesting payment for goods or services.",
+"synonyms": ["bills", "vouchers", "claims"],
+"business_context": "Core table for accounts payable; tracks how much is owed, when it's due, and current approval/payment status.",
+"primary_key": "id",
+"columns": {
+"invoice_number": {
+"type": "TEXT",
+"description": "The unique reference number provided by the vendor.",
+"synonyms": ["bill number", "vendor ref"],
+"is_filterable": true,
+"is_metric": false
+},
+"grand_total": {
+"type": "DECIMAL(15,2)",
+"description": "The final amount to be paid including all taxes.",
+"synonyms": ["invoice value", "total payable"],
+"is_filterable": true,
+"is_metric": true
+},
+"status": {
+"type": "TEXT",
+"description": "The lifecycle stage of the invoice.",
+"synonyms": ["payment status"],
+"is_filterable": true,
+"is_metric": false,
+"enum_values": {
+"validated": "Passed basic system checks",
+"approved": "Management authorized payment",
+"paid": "Funds transferred to vendor"
+}
+},
+"deviation_type": {
+"type": "TEXT",
+"description": "Categorization of discrepancies found during validation (e.g., price mismatch).",
+"synonyms": ["exception type", "variance type"],
+"is_filterable": true,
+"is_metric": false
+}
+},
+"relationships": [
+{
+"target_table": "vendors",
+"join_condition": "invoices.vendor_id = vendors.id",
+"join_type": "many_to_one",
+"description": "The supplier who issued the bill."
+},
+{
+"target_table": "companies",
+"join_condition": "invoices.company_id = companies.id",
+"join_type": "many_to_one",
+"description": "The internal entity that must pay the bill."
+},
+{
+"target_table": "purchase_orders",
+"join_condition": "invoices.po_id = purchase_orders.id",
+"join_type": "many_to_one",
+"description": "The order against which this invoice was raised."
+}
+]
+},
+"payments": {
+"description": "Records of actual cash outflows or transfers to fulfill invoices.",
+"synonyms": ["disbursements", "settlements", "payouts"],
+"business_context": "Used to track actual cash flow and verify when an invoice has been cleared.",
+"primary_key": "id",
+"columns": {
+"amount": {
+"type": "DECIMAL(15,2)",
+"description": "The specific amount paid in this transaction.",
+"synonyms": ["payout amount"],
+"is_filterable": true,
+"is_metric": true
+},
+"payment_mode": {
+"type": "TEXT",
+"description": "The banking method used for transfer.",
+"synonyms": ["transfer type"],
+"is_filterable": true,
+"is_metric": false,
+"enum_values": {
+"RTGS": "Real Time Gross Settlement",
+"NEFT": "National Electronic Funds Transfer",
+"UPI": "Unified Payments Interface"
+}
+}
+},
+"relationships": [
+{
+"target_table": "invoices",
+"join_condition": "payments.invoice_id = invoices.id",
+"join_type": "many_to_one",
+"description": "The bill that is being settled by this payment."
+}
+]
+},
+"po_line_items": {
+"description": "Individual items requested within a Purchase Order.",
+"synonyms": ["order lines", "po details"],
+"business_context": "Used to see exactly what was ordered and at what agreed-upon price.",
+"primary_key": "id",
+"columns": {
+"total_amount": {
+"type": "DECIMAL(15,2)",
+"description": "Quantity multiplied by rate for this line.",
+"synonyms": ["order line value"],
+"is_filterable": true,
+"is_metric": true
+}
+},
+"relationships": [
+{
+"target_table": "purchase_orders",
+"join_condition": "po_line_items.po_id = purchase_orders.id",
+"join_type": "many_to_one",
+"description": "Links the detail line to the main order."
+},
+{
+"target_table": "products",
+"join_condition": "po_line_items.product_id = products.id",
+"join_type": "many_to_one",
+"description": "Identifies the catalog product being ordered."
+}
+]
+},
+"products": {
+"description": "Master list of goods and services that the company procures.",
+"synonyms": ["items", "catalog", "skus"],
+"business_context": "Central source of truth for standard rates and classifications (categories).",
+"primary_key": "id",
+"columns": {
+"category": {
+"type": "TEXT",
+"description": "High-level grouping of products (e.g., IT, Stationery).",
+"synonyms": ["product group"],
+"is_filterable": true,
+"is_metric": false
+},
+"standard_rate": {
+"type": "DECIMAL(12,2)",
+"description": "The expected price per unit for this product.",
+"synonyms": ["market rate", "base price"],
+"is_filterable": true,
+"is_metric": true
+}
+},
+"relationships": []
+},
+"purchase_orders": {
+"description": "Official legal contracts issued to vendors specifying items to be purchased.",
+"synonyms": ["orders", "pos", "procurement contracts"],
+"business_context": "Used to track commitments and planned spend before an invoice arrives.",
+"primary_key": "id",
+"columns": {
+"po_number": {
+"type": "TEXT",
+"description": "Unique identifier for the order.",
+"synonyms": ["order id"],
+"is_filterable": true,
+"is_metric": false
+},
+"total_amount": {
+"type": "DECIMAL(15,2)",
+"description": "Total value of the order.",
+"synonyms": ["order value"],
+"is_filterable": true,
+"is_metric": true
+},
+"status": {
+"type": "TEXT",
+"description": "Lifecycle of the order.",
+"synonyms": ["order status"],
+"is_filterable": true,
+"is_metric": false,
+"enum_values": {
+"approved": "Order ready to be sent to vendor",
+"partially_received": "Some goods delivered",
+"closed": "Order fully fulfilled or cancelled"
+}
+}
+},
+"relationships": [
+{
+"target_table": "departments",
+"join_condition": "purchase_orders.department_id = departments.id",
+"join_type": "many_to_one",
+"description": "The department that initiated the request."
+},
+{
+"target_table": "vendors",
+"join_condition": "purchase_orders.vendor_id = vendors.id",
+"join_type": "many_to_one",
+"description": "The supplier chosen for this order."
+},
+{
+"target_table": "companies",
+"join_condition": "purchase_orders.company_id = companies.id",
+"join_type": "many_to_one",
+"description": "The entity paying for the order."
+}
+]
+},
+"vendors": {
+"description": "Master data for external suppliers and service providers.",
+"synonyms": ["suppliers", "merchants", "contractors"],
+"business_context": "Used for vendor performance analysis, risk tracking (watchlist), and payment term management.",
+"primary_key": "id",
+"columns": {
+"rating": {
+"type": "TEXT",
+"description": "Internal quality or reliability grade (A, B, C).",
+"synonyms": ["vendor grade", "performance tier"],
+"is_filterable": true,
+"is_metric": false
+},
+"is_watchlist": {
+"type": "INTEGER",
+"description": "Flag for vendors with known issues or compliance risks.",
+"synonyms": ["flagged vendor"],
+"is_filterable": true,
+"is_metric": false,
+"enum_values": {
+"1": "High risk - flagged",
+"0": "Normal"
+}
+},
+"payment_terms_days": {
+"type": "INTEGER",
+"description": "The number of days allowed between invoice date and payment date.",
+"synonyms": ["credit period"],
+"is_filterable": true,
+"is_metric": true
+}
+},
+"relationships": []
+}
+},
+"join_paths": {
+"payment_to_vendor": {
+"description": "Trace a payment back to the vendor through the invoice.",
+"use_when": "Who did we pay this month?",
+"steps": [
+{
+"from": "payments",
+"to": "invoices",
+"on": "payments.invoice_id = invoices.id"
+},
+{
+"from": "invoices",
+"to": "vendors",
+"on": "invoices.vendor_id = vendors.id"
+}
+]
+},
+"po_to_department": {
+"description": "Check which department raised an order.",
+"use_when": "What is the total order value for the Engineering department?",
+"steps": [
+{
+"from": "purchase_orders",
+"to": "departments",
+"on": "purchase_orders.department_id = departments.id"
+}
+]
+},
+"invoice_reconciliation_path": {
+"description": "Join invoices to their parent POs and the resulting receipts (GRNs).",
+"use_when": "Compare invoice amounts with what was ordered and received.",
+"steps": [
+{
+"from": "invoices",
+"to": "purchase_orders",
+"on": "invoices.po_id = purchase_orders.id"
+},
+{
+"from": "purchase_orders",
+"to": "grns",
+"on": "grns.po_id = purchase_orders.id"
+}
+]
+}
+},
+"metrics": {
+"total_liability": {
+"description": "Total amount due to vendors for invoices not yet paid.",
+"sql": "SUM(grand_total)",
+"filters": "status != 'paid'",
+"synonyms": ["accounts payable", "outstanding amount"],
+"result_unit": "currency"
+},
+"avg_payment_delay": {
+"description": "Average days taken to pay an invoice beyond its due date.",
+"sql": "AVG(julianday(payment_date) - julianday(due_date))",
+"filters": "payment_date IS NOT NULL",
+"synonyms": ["late days", "delay avg"],
+"result_unit": "days"
+},
+"rejection_rate": {
+"description": "Percentage of items rejected by the warehouse due to issues.",
+"sql": "(SUM(quantity_rejected) * 100.0) / NULLIF(SUM(quantity_received + quantity_rejected), 0)",
+"synonyms": ["defect rate", "return rate"],
+"result_unit": "percentage"
+},
+"active_vendor_count": {
+"description": "Number of unique vendors we have ordered from recently.",
+"sql": "COUNT(DISTINCT vendor_id)",
+"synonyms": ["supplier count"],
+"result_unit": "count"
+}
+},
+"synonyms": {
+"entity_synonyms": {
+"vendors": ["suppliers", "providers", "partners"],
+"invoices": ["bills", "payment requests"],
+"purchase_orders": ["commitments", "buying orders"],
+"grns": ["delivery receipts", "warehouse entries"]
+},
+"status_synonyms": {
+"overdue": "due_date < DATE('now') AND status != 'paid'",
+"pending approval": "status = 'validated'",
+"flagged": "is_watchlist = 1",
+"critical": "rating = 'C'"
+},
+"temporal_expressions": {
+"this_month": {
+"description": "Within the current calendar month.",
+"sql_template": "strftime('%Y-%m', {col}) = strftime('%Y-%m', 'now')",
+"example": "invoices created this month"
+},
+"last_quarter": {
+"description": "Previous three-month financial window.",
+"sql_template": "CAST((strftime('%m', {col}) - 1) / 3 + 1 AS INT) = CAST((strftime('%m', 'now', '-3 months') - 1) / 3 + 1 AS INT) AND strftime('%Y', {col}) = strftime('%Y', 'now', '-3 months')",
+"example": "spend in last quarter"
+}
+}
+},
+"ambiguity_rules": {
+"date_clarification": {
+"trigger_phrases": ["invoice date", "when was the invoice", "date of invoice"],
+"ambiguous_dimensions": [
+{
+"label": "Invoice Issue Date",
+"sql_hint": "invoice_date"
+},
+{
+"label": "Invoice Approval Date",
+"sql_hint": "approval_date"
+},
+{
+"label": "Due Date",
+"sql_hint": "due_date"
+}
+],
+"clarification_question": "Are you asking about when the invoice was issued, approved, or when it is due?",
+"default_assumption": "invoice_date"
+},
+"amount_clarification": {
+"trigger_phrases": ["how much", "total", "amount"],
+"ambiguous_dimensions": [
+{
+"label": "Grand Total (incl Tax)",
+"sql_hint": "grand_total"
+},
+{
+"label": "Taxable Amount",
+"sql_hint": "total_taxable_amount"
+}
+],
+"clarification_question": "Do you want the total including taxes or just the base taxable amount?",
+"default_assumption": "grand_total"
+}
+},
+"query_hints": {
+"window_functions": [
+{
+"name": "vendor_spending_rank",
+"description": "Rank vendors based on total business volume.",
+"trigger_phrases": ["top vendors", "biggest suppliers"],
+"template": "SELECT vendor_id, SUM(grand_total) as volume, RANK() OVER (ORDER BY SUM(grand_total) DESC) as rnk FROM invoices GROUP BY 1"
+},
+{
+"name": "payment_running_total",
+"description": "Cumulative cash outflow over time.",
+"trigger_phrases": ["running total", "cumulative spend"],
+"template": "SELECT payment_date, amount, SUM(amount) OVER (ORDER BY payment_date) as cumulative FROM payments"
+}
+],
+"common_patterns": [
+{
+"name": "three_way_match_check",
+"description": "Compare PO, GRN, and Invoice quantities to find mismatches.",
+"trigger_phrases": ["reconciliation", "match"],
+"template": "SELECT po.po_number, po_li.quantity as ordered, grn_li.quantity_received as received, inv_li.quantity as billed FROM purchase_orders po JOIN po_line_items po_li ON po.id = po_li.po_id LEFT JOIN grn_line_items grn_li ON po_li.id = grn_li.po_line_item_id LEFT JOIN invoice_line_items inv_li ON po_li.product_id = inv_li.product_id AND inv_li.invoice_id IN (SELECT id FROM invoices WHERE po_id = po.id)"
+}
+]
+}
+}
