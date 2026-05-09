@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 
 from logging_config import configure_logging
+from langfuse_tracing import safe_update_observation, traced_span
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DB_PATH = ROOT_DIR / "data" / "assignment.db"
@@ -22,6 +23,23 @@ DISPLAY_LABEL_LOOKUPS = {
     "po_id": ("purchase_orders", "id", "po_number", "po_number"),
     "grn_id": ("grns", "id", "grn_number", "grn_number"),
 }
+
+MAX_TRACE_RESULT_ROWS = 50
+
+
+def summarize_result_for_trace(result):
+    if isinstance(result, str):
+        return {"status": "error", "message": result}
+
+    if isinstance(result, list):
+        return {
+            "status": "ok",
+            "row_count": len(result),
+            "rows": result[:MAX_TRACE_RESULT_ROWS],
+            "truncated": len(result) > MAX_TRACE_RESULT_ROWS,
+        }
+
+    return {"status": "unknown", "value": result}
 
 
 def remove_sql_literals_and_comments(query):
@@ -113,36 +131,64 @@ def enrich_results_with_display_labels(results, cursor):
 
 
 def run_query(query, db_name=DB_PATH):
-    conn = sqlite3.connect(db_name)
-    conn.row_factory = sqlite3.Row
+    with traced_span(
+        "execute-sqlite-query",
+        input={
+            "sql": query,
+            "db_path": str(db_name),
+        },
+        metadata={"component": "sqlite"},
+    ) as span:
+        conn = sqlite3.connect(db_name)
+        conn.row_factory = sqlite3.Row
 
-    try:
-        cursor = conn.cursor()
-        guardrail_error = validate_sql_guardrails(query)
+        try:
+            cursor = conn.cursor()
+            guardrail_error = validate_sql_guardrails(query)
 
-        if guardrail_error:
-            return guardrail_error
+            if guardrail_error:
+                safe_update_observation(
+                    span,
+                    output=summarize_result_for_trace(guardrail_error),
+                    level="ERROR",
+                    status_message=guardrail_error,
+                )
+                return guardrail_error
 
-        validation_error = validate_query_tables(query, cursor)
+            validation_error = validate_query_tables(query, cursor)
 
-        if validation_error:
-            return validation_error
+            if validation_error:
+                safe_update_observation(
+                    span,
+                    output=summarize_result_for_trace(validation_error),
+                    level="ERROR",
+                    status_message=validation_error,
+                )
+                return validation_error
 
-        validate_query_plan(query, cursor)
-        logger.info("Running SQL query")
-        cursor.execute(query)
-        rows = cursor.fetchall()
+            validate_query_plan(query, cursor)
+            logger.info("Running SQL query")
+            cursor.execute(query)
+            rows = cursor.fetchall()
 
-        results = [dict(row) for row in rows]
-        results = enrich_results_with_display_labels(results, cursor)
-        logger.info("Returned %s rows", len(results))
-        return results
+            results = [dict(row) for row in rows]
+            results = enrich_results_with_display_labels(results, cursor)
+            logger.info("Returned %s rows", len(results))
+            safe_update_observation(span, output=summarize_result_for_trace(results))
+            return results
 
-    except sqlite3.Error as e:
-        logger.error("SQLite failed to run SQL: %s", e)
-        return f"SQL Error: {e}"
-    finally:
-        conn.close()
+        except sqlite3.Error as e:
+            error_message = f"SQL Error: {e}"
+            logger.error("SQLite failed to run SQL: %s", e)
+            safe_update_observation(
+                span,
+                output=summarize_result_for_trace(error_message),
+                level="ERROR",
+                status_message=error_message,
+            )
+            return error_message
+        finally:
+            conn.close()
 
 
 if __name__ == "__main__":

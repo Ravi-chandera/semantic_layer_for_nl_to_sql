@@ -16,3 +16,7 @@ logs/
 
 # Runtime chart exports
 charts/
+
+# Runtime chat history
+data/chat_history.db
+data/chat_history.db-*

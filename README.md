@@ -41,6 +41,16 @@ The LangGraph pipeline now uses thread-scoped in-memory checkpoints. Streamlit c
 
 Each turn stores a compact memory record containing the original question, resolved standalone question, selected tables and metrics, generated SQL, assumptions, chart hint, clarifying question text, and a small SQL execution summary. Before routing a follow-up, a resolver node rewrites the latest user message into a complete standalone question using only that thread's recent memory.
 
+### Langfuse Tracing
+
+Streamlit creates a deterministic Langfuse trace id from the conversation `thread_id`, so every turn in the same chat is written to one Langfuse trace. The trace contains named observations for the conversation turn, LangGraph nodes, Gemini calls, SQLite execution, and chart planning. Root turn observations include the user question as input and the generated SQL output, SQL execution summary, and chart details as output.
+
+See sample trace: [sample trace](https://cloud.langfuse.com/project/cmoy8uw0u01x4ad08i1fekkuu/traces/47d9eb3322380fde86b86a2aeb4e8686?timestamp=2026-05-09T11%3A26%3A05.016Z&observation=67e8f238dc3543d4)
+
+### Persistent Chat History
+
+The app stores chats in a local SQLite database at `data/chat_history.db`. Each chat is named from the first user question, and the sidebar can load saved chats later. The database stores user messages, assistant outputs, chart JSON, and the compact conversation memory snapshot used to rehydrate follow-up context after loading a previous chat.
+
 ### SQL Safety and Validation
 
 Before execution, generated SQL passes through guardrails:
@@ -77,6 +87,9 @@ Create a `.env` file in the repo root:
 
 ```bash
 GEMINI_API_KEY=your_api_key_here
+LANGFUSE_SECRET_KEY=your_langfuse_secret_key
+LANGFUSE_PUBLIC_KEY=your_langfuse_public_key
+LANGFUSE_BASE_URL=https://cloud.langfuse.com
 ```
 
 Run the Streamlit app:
@@ -111,7 +124,7 @@ The SQL runner owns validation. That way, even if another UI or script calls `ru
 - The semantic layer was generated from schema metadata and then used as a prototype artifact. In a real implementation, human should review metric definitions and synonyms.
 - The write guardrail blocks obvious mutation statements, but production systems should use a read-only database user, query timeouts, row limits, and a proper SQL parser.
 - Temporal phrases depend on SQLite `date('now')`, so test results vary with the current date.
-- Conversation memory is in-process only. Restarting Streamlit clears memory; production deployments should use a persistent LangGraph checkpointer.
+- Chat transcripts are persisted locally in `data/chat_history.db`, but LangGraph's live checkpoint is rehydrated from a compact memory snapshot rather than using a full persistent checkpointer.
 
 ## What I Would Improve With More Time
 
