@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import re
 import sqlite3
 import uuid
@@ -213,8 +214,29 @@ def _keyword_signature_can_match(signature: str):
     return len(signature.split()) >= 2
 
 
+def _disable_embedding_progress_bars():
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    os.environ.setdefault("TQDM_DISABLE", "1")
+
+    try:
+        from huggingface_hub.utils import disable_progress_bars
+
+        disable_progress_bars()
+    except Exception:
+        logger.debug("Unable to disable Hugging Face Hub progress bars.", exc_info=True)
+
+    try:
+        from transformers.utils import logging as transformers_logging
+
+        transformers_logging.disable_progress_bar()
+    except Exception:
+        logger.debug("Unable to disable Transformers progress bars.", exc_info=True)
+
+
 @lru_cache(maxsize=1)
 def get_embedding_model():
+    _disable_embedding_progress_bars()
+
     from sentence_transformers import SentenceTransformer
 
     return SentenceTransformer(EMBEDDING_MODEL_NAME)
