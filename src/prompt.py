@@ -47,9 +47,14 @@ Before writing SQL, silently resolve:
 - If a reasonable default assumption is safe (e.g., "most recent 30 days"), state it in `Assumptions` and proceed.
 
 ### Context Format
-table_name_1: All details about this table
-table_name_2: All details about this table
-...
+The context can include these semantic-layer sections:
+- `tables`: selected tables only, with columns, relationships, synonyms, and business context.
+- `metrics`: selected metrics only, including metric SQL expressions, filters, synonyms, and result units. Use these metric definitions when the user asks for a matching business metric.
+- `join_paths`: only join paths whose every step uses the selected tables. Use these paths for join keys and join direction; do not introduce joins to tables absent from `tables`.
+- `ambiguity_rules`: schema-specific ambiguity guidance. Use it to decide when a clarification is required or which default assumption is acceptable.
+- `query_hints`: reusable SQL patterns for rankings, running totals, date filters, common joins, and other known analytical patterns. Adapt them only with tables and columns available in `tables`.
+
+When `metrics`, `join_paths`, `ambiguity_rules`, or `query_hints` are present, treat them as authoritative semantic guidance, but still obey the selected table/column limits in `tables`.
 
 ---
 

@@ -81,11 +81,62 @@ def select_valid_tables(router_response, semantic_layer):
     return valid_tables
 
 
-def build_sql_context(selected_tables, semantic_layer):
+def select_valid_metrics(router_response, semantic_layer):
+    available_metrics = set(semantic_layer.get("metrics", {}).keys())
+    selected_metrics = router_response.get("metrics", [])
+
+    valid_metrics = [metric for metric in selected_metrics if metric in available_metrics]
+    invalid_metrics = sorted(set(selected_metrics) - available_metrics)
+
+    if invalid_metrics:
+        logger.warning("Router selected metrics not present in semantic layer: %s", invalid_metrics)
+
+    logger.info("Selected metrics for SQL context: %s", valid_metrics)
+    return valid_metrics
+
+
+def filter_join_paths_for_tables(selected_tables, semantic_layer):
+    selected_table_set = set(selected_tables)
+    filtered_join_paths = {}
+
+    for path_name, path_info in semantic_layer.get("join_paths", {}).items():
+        steps = path_info.get("steps", [])
+        path_tables = {
+            table
+            for step in steps
+            for table in (step.get("from"), step.get("to"))
+            if table
+        }
+
+        if path_tables and path_tables.issubset(selected_table_set):
+            filtered_join_paths[path_name] = path_info
+
+    return filtered_join_paths
+
+
+def build_sql_context(selected_tables, selected_metrics, semantic_layer):
     context = []
 
+    table_context = {}
     for table in selected_tables:
-        context.append(f"{table}: {json.dumps(semantic_layer['tables'][table], indent=2)}")
+        table_context[table] = semantic_layer["tables"][table]
+
+    context.append(f"tables: {json.dumps(table_context, indent=2)}")
+
+    metric_context = {}
+    for metric in selected_metrics:
+        metric_context[metric] = semantic_layer["metrics"][metric]
+
+    if metric_context:
+        context.append(f"metrics: {json.dumps(metric_context, indent=2)}")
+
+    join_path_context = filter_join_paths_for_tables(selected_tables, semantic_layer)
+    if join_path_context:
+        context.append(f"join_paths: {json.dumps(join_path_context, indent=2)}")
+
+    for key in ("ambiguity_rules", "query_hints"):
+        if key in semantic_layer:
+            context.append(f"{key}: {json.dumps(semantic_layer[key], indent=2)}")
 
     return "\n\n".join(context)
 
@@ -117,6 +168,7 @@ def generate_sql_for_question(user_question, model_name="gemini-3-flash-preview"
     logger.info("Router response: %s", router_response)
 
     selected_tables = select_valid_tables(router_response, semantic_layer)
+    selected_metrics = select_valid_metrics(router_response, semantic_layer)
 
     if not selected_tables:
         logger.warning("No valid tables selected, skipping SQL generation")
@@ -132,7 +184,7 @@ def generate_sql_for_question(user_question, model_name="gemini-3-flash-preview"
             "Chart": "none",
         }
 
-    sql_context = build_sql_context(selected_tables, semantic_layer)
+    sql_context = build_sql_context(selected_tables, selected_metrics, semantic_layer)
 
     sql_prompt = create_sql_prompt(sql_context, user_question)
     sql_response_text = gemini_call(model_name, sql_prompt)
