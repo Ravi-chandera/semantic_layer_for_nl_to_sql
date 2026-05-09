@@ -83,9 +83,10 @@ def conversation_turn_trace(thread_id, user_question, chat_name=None, turn_index
     trace_name = f"NL to SQL: {_shorten(chat_name or user_question, 140)}"
     metadata = {
         "component": "streamlit",
-        "threadId": thread_id,
-        "turnIndex": turn_index,
+        "threadId": str(thread_id),
     }
+    if turn_index is not None:
+        metadata["turnIndex"] = str(turn_index)
 
     try:
         from langfuse import propagate_attributes

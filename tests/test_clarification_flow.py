@@ -10,6 +10,7 @@ sys.path.append(str(SRC_DIR))
 from pipeline import (  # noqa: E402
     MAX_CLARIFICATION_ATTEMPTS,
     clarification_attempts_for_current_question,
+    is_executable_sql,
     normalize_sql_response_after_generation,
 )
 
@@ -103,6 +104,34 @@ class ClarificationFlowTests(unittest.TestCase):
         self.assertFalse(normalized["Requires_Clarification"])
         self.assertTrue(normalized["Clarification_Limit_Reached"])
         self.assertIsNone(normalized["Followup_Questions"])
+
+    def test_insufficient_data_sql_text_is_not_treated_as_sql(self):
+        state = {
+            "conversation_turns": [],
+            "question_resolution": {"is_follow_up": False, "memory_used": None},
+        }
+        sql_response = {
+            "SQL": "Insufficient data in context: invoices table.",
+            "Explanation": "Could not answer with selected context.",
+            "Assumptions": None,
+            "Followup_Questions": None,
+            "Chart": "none",
+        }
+
+        normalized = normalize_sql_response_after_generation(sql_response, state)
+
+        self.assertIsNone(normalized["SQL"])
+        self.assertFalse(normalized["Requires_Clarification"])
+        self.assertEqual(
+            normalized["Explanation"],
+            "Insufficient data in context: invoices table.",
+        )
+
+    def test_executable_sql_detection_accepts_read_queries_only(self):
+        self.assertTrue(is_executable_sql("SELECT * FROM invoices"))
+        self.assertTrue(is_executable_sql("-- comment\nWITH totals AS (SELECT 1) SELECT * FROM totals"))
+        self.assertFalse(is_executable_sql("Insufficient data in context: invoices table."))
+        self.assertFalse(is_executable_sql("DELETE FROM invoices"))
 
 
 if __name__ == "__main__":

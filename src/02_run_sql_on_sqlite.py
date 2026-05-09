@@ -13,6 +13,10 @@ configure_logging()
 logger = logging.getLogger(__name__)
 
 BLOCKED_SQL_OPERATIONS = ("INSERT", "UPDATE", "DELETE")
+READ_QUERY_PATTERN = re.compile(
+    r"^\s*(?:(?:--[^\n]*(?:\n|$)|/\*.*?\*/)\s*)*(?:SELECT|WITH)\b",
+    re.IGNORECASE | re.DOTALL,
+)
 
 DISPLAY_LABEL_LOOKUPS = {
     "vendor_id": ("vendors", "id", "name", "vendor_name"),
@@ -48,6 +52,10 @@ def remove_sql_literals_and_comments(query):
 
 
 def validate_sql_guardrails(query):
+    if not READ_QUERY_PATTERN.match(query):
+        logger.error("SQL guardrail blocked non-read query")
+        return "SQL Guardrail Error: only SELECT/WITH read queries are allowed."
+
     searchable_query = remove_sql_literals_and_comments(query)
     blocked_pattern = rf"\b({'|'.join(BLOCKED_SQL_OPERATIONS)})\b"
     blocked_matches = sorted(set(re.findall(blocked_pattern, searchable_query, flags=re.IGNORECASE)))
