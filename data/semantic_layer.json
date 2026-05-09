@@ -1135,6 +1135,23 @@
       ],
       "clarification_question": "Do you mean the total billed amount (including tax), the taxable subtotal, or the actual amount paid?",
       "default_assumption": "grand_total"
+    },
+    "approval_details_ambiguity": {
+      "trigger_phrases": ["approval details", "approver details", "approval info"],
+      "applies_to_tables": ["approval_matrix"],
+      "ambiguous_dimensions": [
+        {
+          "label": "approval_threshold_bands",
+          "sql_hint": "approval_matrix.min_amount, approval_matrix.max_amount, approval_matrix.approver_role"
+        },
+        {
+          "label": "approver_contact_details",
+          "sql_hint": "approval_matrix.approver_name, approval_matrix.approver_email"
+        }
+      ],
+      "clarification_question": "Do you want approval threshold bands or approver contact details?",
+      "default_assumption": null,
+      "reason": "Approval details can mean threshold bands or approver contact information, and those produce different result sets."
     }
   },
   "query_hints": {

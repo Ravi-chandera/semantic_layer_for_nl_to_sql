@@ -58,6 +58,7 @@ from pipeline_semantic_context import (
     build_sql_context,
     entity_alias_for_table,
     filter_join_paths_for_tables,
+    find_required_clarification_rule,
     label_alias_for_entity,
     pick_display_column,
     select_valid_metrics,
@@ -326,6 +327,27 @@ def lookup_cache_node(state: NLToSQLState):
 
         layer_hash = state.get("semantic_layer_hash") or semantic_layer_hash(state["semantic_layer"])
         resolved_question = state.get("resolved_question") or state["user_question"]
+        forced_clarification = find_required_clarification_rule(
+            state["semantic_layer"],
+            state.get("selected_tables", []),
+            resolved_question,
+        )
+        if forced_clarification:
+            node_output = {
+                "cache_hit": False,
+                "cache_lookup": {
+                    "skipped": True,
+                    "reason": (
+                        "Resolved question matches a no-default semantic ambiguity rule; "
+                        "clarification must run before cache reuse."
+                    ),
+                    "matched_rule": forced_clarification.get("name"),
+                    "semantic_layer_hash": layer_hash,
+                },
+            }
+            safe_update_observation(span, output=node_output)
+            return node_output
+
         hit = lookup_cache(resolved_question, layer_hash)
 
         if not hit:
@@ -499,6 +521,45 @@ def evaluate_clarification_node(state: NLToSQLState):
         },
     ) as span:
         clarification_attempts = clarification_attempts_for_current_question(state)
+        forced_clarification = find_required_clarification_rule(
+            state["semantic_layer"],
+            state.get("selected_tables", []),
+            state.get("resolved_question") or state["user_question"],
+        )
+        if forced_clarification:
+            clarifying_question = (
+                forced_clarification.get("clarifying_question")
+                or "Can you clarify the business meaning you want analyzed?"
+            )
+            clarification_response = {
+                "clarification_needed": True,
+                "clarifying_question": clarifying_question,
+                "can_proceed": False,
+                "default_assumption": None,
+                "reason": forced_clarification.get("reason"),
+                "unanswerable": False,
+                "matched_rule": forced_clarification.get("name"),
+            }
+            node_output = {
+                "clarification_response": clarification_response,
+                "clarification_attempts": clarification_attempts,
+                "clarification_blocks_sql": True,
+            }
+
+            if clarification_attempts < MAX_CLARIFICATION_ATTEMPTS:
+                node_output["sql_response"] = clarification_needed_response(
+                    clarifying_question,
+                    clarification_attempts=clarification_attempts + 1,
+                    reason=forced_clarification.get("reason"),
+                )
+            else:
+                node_output["sql_response"] = clarification_limit_response(
+                    forced_clarification.get("reason")
+                )
+
+            safe_update_observation(span, output=node_output)
+            return node_output
+
         clarification_prompt = create_clarification_prompt(
             context=state["sql_context"],
             user_question=state.get("resolved_question") or state["user_question"],

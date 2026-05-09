@@ -11,8 +11,12 @@ from pipeline import (  # noqa: E402
     MAX_CLARIFICATION_ATTEMPTS,
     clarification_attempts_for_current_question,
     is_executable_sql,
+    load_json,
+    lookup_cache_node,
     normalize_sql_response_after_generation,
 )
+from pipeline_config import SEMANTIC_LAYER_PATH  # noqa: E402
+from pipeline_semantic_context import find_required_clarification_rule  # noqa: E402
 
 
 class ClarificationFlowTests(unittest.TestCase):
@@ -132,6 +136,40 @@ class ClarificationFlowTests(unittest.TestCase):
         self.assertTrue(is_executable_sql("-- comment\nWITH totals AS (SELECT 1) SELECT * FROM totals"))
         self.assertFalse(is_executable_sql("Insufficient data in context: invoices table."))
         self.assertFalse(is_executable_sql("DELETE FROM invoices"))
+
+    def test_approval_details_matches_no_default_clarification_rule(self):
+        semantic_layer = load_json(SEMANTIC_LAYER_PATH)
+
+        rule = find_required_clarification_rule(
+            semantic_layer,
+            ["approval_matrix"],
+            "Show me approval details",
+        )
+
+        self.assertIsNotNone(rule)
+        self.assertEqual(rule["name"], "approval_details_ambiguity")
+        self.assertEqual(
+            rule["clarifying_question"],
+            "Do you want approval threshold bands or approver contact details?",
+        )
+
+    def test_cache_lookup_skips_no_default_clarification_rule(self):
+        semantic_layer = load_json(SEMANTIC_LAYER_PATH)
+
+        result = lookup_cache_node(
+            {
+                "user_question": "Show me approval details",
+                "resolved_question": "Show me approval details",
+                "semantic_layer": semantic_layer,
+            }
+        )
+
+        self.assertFalse(result["cache_hit"])
+        self.assertTrue(result["cache_lookup"]["skipped"])
+        self.assertEqual(
+            result["cache_lookup"]["matched_rule"],
+            "approval_details_ambiguity",
+        )
 
 
 if __name__ == "__main__":

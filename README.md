@@ -144,8 +144,8 @@ The SQL runner owns validation. That way, even if another UI or script calls `ru
 
 - The semantic layer was generated from schema metadata and then used as a prototype artifact. In a real implementation, human should review metric definitions and synonyms.
 - The write guardrail blocks obvious mutation statements, but production systems should use a read-only database user, query timeouts, row limits, and a proper SQL parser.
-- Temporal phrases depend on SQLite `date('now')`, so test results vary with the current date.
-- Chat transcripts are persisted locally in `data/chat_history.db`, but LangGraph's live checkpoint is rehydrated from a compact memory snapshot rather than using a full persistent checkpointer.
+- Input Guardrails are not implemented
+- Benchmarking of individual Prompt will be needed to stabilize prompts for production use.
 
 ## What I Would Improve With More Time
 

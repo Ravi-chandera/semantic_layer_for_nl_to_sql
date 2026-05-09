@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,39 @@ def select_valid_metrics(router_response, semantic_layer):
 
     logger.info("Selected metrics for SQL context: %s", valid_metrics)
     return valid_metrics
+
+
+def phrase_matches(text, phrase):
+    normalized_phrase = str(phrase or "").strip().lower()
+    if not normalized_phrase:
+        return False
+
+    pattern = rf"(?<!\w){re.escape(normalized_phrase)}(?!\w)"
+    return bool(re.search(pattern, text))
+
+
+def find_required_clarification_rule(semantic_layer, selected_tables, question):
+    normalized_question = str(question or "").lower()
+    selected_table_set = set(selected_tables or [])
+
+    for rule_name, rule in semantic_layer.get("ambiguity_rules", {}).items():
+        if rule.get("default_assumption"):
+            continue
+
+        applies_to_tables = set(rule.get("applies_to_tables") or [])
+        if applies_to_tables and selected_table_set and selected_table_set.isdisjoint(applies_to_tables):
+            continue
+
+        trigger_phrases = rule.get("trigger_phrases") or []
+        if any(phrase_matches(normalized_question, phrase) for phrase in trigger_phrases):
+            return {
+                "name": rule_name,
+                "rule": rule,
+                "clarifying_question": rule.get("clarification_question"),
+                "reason": rule.get("reason") or f"Matched semantic ambiguity rule: {rule_name}.",
+            }
+
+    return None
 
 
 def filter_join_paths_for_tables(selected_tables, semantic_layer):

@@ -1,12 +1,14 @@
 import importlib.util
 import json
 import sys
+import time
 import uuid
 from functools import lru_cache
 from pathlib import Path
 
 import plotly.io as pio
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -16,6 +18,15 @@ SQL_RUNNER_PATH = SRC_DIR / "02_run_sql_on_sqlite.py"
 sys.path.append(str(SRC_DIR))
 
 from chart_agent import generate_chart_for_result
+from benchmark_store import (
+    BENCHMARK_QUESTIONS,
+    append_benchmark_record,
+    build_benchmark_record,
+    init_benchmark_store,
+    new_benchmark_run_id,
+    utc_now as benchmark_utc_now,
+    write_benchmark_dashboard,
+)
 from chat_store import (
     append_message,
     get_chat,
@@ -52,6 +63,7 @@ def load_sql_runner():
 
 def init_session_state():
     init_chat_store()
+    init_benchmark_store()
 
     if "thread_id" not in st.session_state:
         st.session_state.thread_id = f"streamlit-{uuid.uuid4()}"
@@ -224,6 +236,95 @@ def run_pipeline(user_question, thread_id, chat_name, turn_index):
             flush_langfuse()
 
 
+def record_benchmark_run(
+    *,
+    run_id,
+    source,
+    question,
+    started_at,
+    ended_at,
+    latency_ms,
+    sql_output=None,
+    sql_result=None,
+    thread_id=None,
+    chat_id=None,
+    category=None,
+    expected_capability=None,
+    chart_path=None,
+    chart_error=None,
+    error_message=None,
+):
+    record = build_benchmark_record(
+        run_id=run_id,
+        source=source,
+        question=question,
+        started_at=started_at,
+        ended_at=ended_at,
+        latency_ms=latency_ms,
+        sql_output=sql_output,
+        sql_result=sql_result,
+        thread_id=thread_id,
+        chat_id=chat_id,
+        category=category,
+        expected_capability=expected_capability,
+        chart_path=chart_path,
+        chart_error=chart_error,
+        error_message=error_message,
+    )
+    append_benchmark_record(record)
+    write_benchmark_dashboard()
+    return record
+
+
+def run_single_benchmark_question(item, run_id, turn_index):
+    question = item["question"]
+    thread_id = f"benchmark-{uuid.uuid4()}"
+    started_at = benchmark_utc_now()
+    started_perf = time.perf_counter()
+    sql_output = None
+    sql_result = None
+    chart_path = None
+    chart_error = None
+    error_message = None
+
+    try:
+        (
+            sql_output,
+            sql_result,
+            _fig,
+            _chart_plan,
+            chart_path,
+            chart_error,
+        ) = run_pipeline(
+            user_question=question,
+            thread_id=thread_id,
+            chat_name=f"Benchmark: {item['category']}",
+            turn_index=turn_index,
+        )
+    except Exception as e:
+        error_message = str(e)
+
+    ended_at = benchmark_utc_now()
+    latency_ms = (time.perf_counter() - started_perf) * 1000
+
+    return record_benchmark_run(
+        run_id=run_id,
+        source="benchmark_suite",
+        question=question,
+        started_at=started_at,
+        ended_at=ended_at,
+        latency_ms=latency_ms,
+        sql_output=sql_output,
+        sql_result=sql_result,
+        thread_id=thread_id,
+        category=item["category"],
+        expected_capability=item["expected_capability"],
+        chart_path=chart_path,
+        chart_error=chart_error,
+        error_message=error_message,
+    )
+
+
 def is_empty_value(value):
     return value is None or value == "" or value == [] or value == {}
 
@@ -302,6 +403,137 @@ def render_assistant_message(message):
         st.code(json.dumps(sql_result, indent=2, default=str), language="json")
 
 
+def render_chat_tab():
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            if message["role"] == "user":
+                st.markdown(message["content"])
+            else:
+                render_assistant_message(message)
+
+    submitted_question = st.chat_input("Ask a question about the AP data")
+
+    if submitted_question:
+        user_question = submitted_question.strip()
+
+        if not user_question:
+            st.warning("Please enter a question.")
+        else:
+            user_message = {"role": "user", "content": user_question}
+            chat = ensure_active_chat(user_question)
+            append_message(chat["id"], "user", user_message)
+            st.session_state.messages.append(user_message)
+
+            with st.chat_message("user"):
+                st.markdown(user_question)
+
+            with st.chat_message("assistant"):
+                run_id = new_benchmark_run_id()
+                started_at = benchmark_utc_now()
+                started_perf = time.perf_counter()
+                sql_output = None
+                sql_result = None
+                chart_path = None
+                chart_error = None
+                error_message = None
+
+                with st.spinner("Checking question clarity, generating SQL, running query, and planning chart..."):
+                    try:
+                        (
+                            sql_output,
+                            sql_result,
+                            fig,
+                            chart_plan,
+                            chart_path,
+                            chart_error,
+                        ) = run_pipeline(
+                            user_question=user_question,
+                            thread_id=st.session_state.thread_id,
+                            chat_name=chat["name"],
+                            turn_index=len([
+                                message
+                                for message in st.session_state.messages
+                                if message["role"] == "user"
+                            ]),
+                        )
+                        assistant_message = {
+                            "role": "assistant",
+                            "sql_output": sql_output,
+                            "sql_result": sql_result,
+                            "fig": fig,
+                            "chart_plan": chart_plan,
+                            "chart_path": str(chart_path) if chart_path else None,
+                            "chart_error": chart_error,
+                        }
+                    except Exception as e:
+                        error_message = str(e)
+                        assistant_message = {
+                            "role": "assistant",
+                            "error": f"Pipeline failed: {e}",
+                        }
+
+                ended_at = benchmark_utc_now()
+                latency_ms = (time.perf_counter() - started_perf) * 1000
+                record_benchmark_run(
+                    run_id=run_id,
+                    source="chat",
+                    question=user_question,
+                    started_at=started_at,
+                    ended_at=ended_at,
+                    latency_ms=latency_ms,
+                    sql_output=sql_output,
+                    sql_result=sql_result,
+                    thread_id=st.session_state.thread_id,
+                    chat_id=chat["id"],
+                    chart_path=chart_path,
+                    chart_error=chart_error,
+                    error_message=error_message,
+                )
+
+            render_assistant_message(assistant_message)
+            st.session_state.messages.append(assistant_message)
+            append_message(
+                chat["id"],
+                "assistant",
+                serialize_assistant_message(assistant_message),
+            )
+            persist_memory_snapshot()
+
+
+def render_benchmark_tab():
+    st.subheader("Benchmark Dashboard")
+    st.caption(
+        "Records are append-only in data/benchmark_results.db. "
+        "The HTML dashboard is regenerated from those records."
+    )
+
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        run_suite = st.button("Run fixed benchmark suite", type="primary")
+    with col2:
+        refresh_dashboard = st.button("Refresh dashboard")
+
+    if run_suite:
+        run_id = new_benchmark_run_id()
+        progress = st.progress(0)
+        status = st.empty()
+        records = []
+
+        for index, item in enumerate(BENCHMARK_QUESTIONS, start=1):
+            status.write(f"Running {index}/{len(BENCHMARK_QUESTIONS)}: {item['question']}")
+            records.append(run_single_benchmark_question(item, run_id, index))
+            progress.progress(index / len(BENCHMARK_QUESTIONS))
+
+        status.success(f"Appended {len(records)} benchmark records.")
+
+    if refresh_dashboard:
+        write_benchmark_dashboard()
+
+    dashboard_path, html_text = write_benchmark_dashboard()
+    st.caption(f"Dashboard file: {dashboard_path}")
+    components.html(html_text, height=900, scrolling=True)
+
+
 st.set_page_config(page_title="NL to SQL", layout="wide")
 init_session_state()
 
@@ -328,69 +560,10 @@ with st.sidebar:
             load_saved_chat(selected_chat_id)
             st.rerun()
 
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        if message["role"] == "user":
-            st.markdown(message["content"])
-        else:
-            render_assistant_message(message)
+chat_tab, benchmark_tab = st.tabs(["Chat", "Benchmark"])
 
-submitted_question = st.chat_input("Ask a question about the AP data")
+with chat_tab:
+    render_chat_tab()
 
-if submitted_question:
-    user_question = submitted_question.strip()
-
-    if not user_question:
-        st.warning("Please enter a question.")
-    else:
-        user_message = {"role": "user", "content": user_question}
-        chat = ensure_active_chat(user_question)
-        append_message(chat["id"], "user", user_message)
-        st.session_state.messages.append(user_message)
-
-        with st.chat_message("user"):
-            st.markdown(user_question)
-
-        with st.chat_message("assistant"):
-            with st.spinner("Checking question clarity, generating SQL, running query, and planning chart..."):
-                try:
-                    (
-                        sql_output,
-                        sql_result,
-                        fig,
-                        chart_plan,
-                        chart_path,
-                        chart_error,
-                    ) = run_pipeline(
-                        user_question=user_question,
-                        thread_id=st.session_state.thread_id,
-                        chat_name=chat["name"],
-                        turn_index=len([
-                            message
-                            for message in st.session_state.messages
-                            if message["role"] == "user"
-                        ]),
-                    )
-                    assistant_message = {
-                        "role": "assistant",
-                        "sql_output": sql_output,
-                        "sql_result": sql_result,
-                        "fig": fig,
-                        "chart_plan": chart_plan,
-                        "chart_path": str(chart_path) if chart_path else None,
-                        "chart_error": chart_error,
-                    }
-                except Exception as e:
-                    assistant_message = {
-                        "role": "assistant",
-                        "error": f"Pipeline failed: {e}",
-                    }
-
-            render_assistant_message(assistant_message)
-            st.session_state.messages.append(assistant_message)
-            append_message(
-                chat["id"],
-                "assistant",
-                serialize_assistant_message(assistant_message),
-            )
-            persist_memory_snapshot()
+with benchmark_tab:
+    render_benchmark_tab()

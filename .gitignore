@@ -20,3 +20,6 @@ charts/
 # Runtime cache store
 data/nl_to_sql_cache.db
 
+# Runtime benchmark store and generated dashboard
+data/benchmark_results.db
+data/benchmark_dashboard.html
