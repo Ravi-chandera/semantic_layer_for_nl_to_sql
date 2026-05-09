@@ -5,6 +5,9 @@ from google import genai
 import json
 import logging
 from pathlib import Path
+from typing import Any, Literal, TypedDict
+
+from langgraph.graph import END, START, StateGraph
 
 from logging_config import configure_logging
 from prompt import ROUTER_PROMPT, SQL_GENERATION_PROMPT
@@ -14,6 +17,22 @@ SEMANTIC_LAYER_PATH = ROOT_DIR / "data" / "semantic_layer.json"
 
 configure_logging()
 logger = logging.getLogger(__name__)
+
+
+class NLToSQLState(TypedDict, total=False):
+    user_question: str
+    model_name: str
+    semantic_layer: dict[str, Any]
+    router_prompt: str
+    router_response_text: str
+    router_response: dict[str, Any]
+    selected_tables: list[str]
+    selected_metrics: list[str]
+    sql_context: str
+    sql_prompt: str
+    sql_response_text: str
+    sql_response: dict[str, Any]
+
 
 def gemini_call(model_name, contents):
     load_dotenv(override=True)
@@ -227,8 +246,28 @@ def create_sql_prompt(context, user_question):
     )
 
 
-def generate_sql_for_question(user_question, model_name="gemini-3-flash-preview"):
-    semantic_layer = load_json(SEMANTIC_LAYER_PATH)
+def no_valid_tables_response():
+    return {
+        "SQL": None,
+        "Explanation": "No valid database table was selected for this question.",
+        "Assumptions": "The router did not map the question to any table present in the semantic layer.",
+        "Followup_Questions": (
+            "Can you rephrase the question using available business entities like invoices, "
+            "payments, vendors, purchase orders, products, departments, companies, GRNs, "
+            "or approval matrix?"
+        ),
+        "Chart": "none",
+    }
+
+
+def load_semantic_layer_node(state: NLToSQLState):
+    return {"semantic_layer": load_json(SEMANTIC_LAYER_PATH)}
+
+
+def route_question_node(state: NLToSQLState):
+    semantic_layer = state["semantic_layer"]
+    user_question = state["user_question"]
+    model_name = state["model_name"]
 
     router_prompt = create_router_prompt(semantic_layer, user_question)
     router_response_text = gemini_call(model_name, router_prompt)
@@ -236,31 +275,89 @@ def generate_sql_for_question(user_question, model_name="gemini-3-flash-preview"
 
     logger.info("Router response: %s", router_response)
 
+    return {
+        "router_prompt": router_prompt,
+        "router_response_text": router_response_text,
+        "router_response": router_response,
+    }
+
+
+def select_semantic_context_node(state: NLToSQLState):
+    semantic_layer = state["semantic_layer"]
+    router_response = state["router_response"]
+
     selected_tables = select_valid_tables(router_response, semantic_layer)
     selected_metrics = select_valid_metrics(router_response, semantic_layer)
 
     if not selected_tables:
         logger.warning("No valid tables selected, skipping SQL generation")
         return {
-            "SQL": None,
-            "Explanation": "No valid database table was selected for this question.",
-            "Assumptions": "The router did not map the question to any table present in the semantic layer.",
-            "Followup_Questions": (
-                "Can you rephrase the question using available business entities like invoices, "
-                "payments, vendors, purchase orders, products, departments, companies, GRNs, "
-                "or approval matrix?"
-            ),
-            "Chart": "none",
+            "selected_tables": selected_tables,
+            "selected_metrics": selected_metrics,
+            "sql_response": no_valid_tables_response(),
         }
 
-    sql_context = build_sql_context(selected_tables, selected_metrics, semantic_layer)
+    return {
+        "selected_tables": selected_tables,
+        "selected_metrics": selected_metrics,
+        "sql_context": build_sql_context(selected_tables, selected_metrics, semantic_layer),
+    }
 
-    sql_prompt = create_sql_prompt(sql_context, user_question)
-    sql_response_text = gemini_call(model_name, sql_prompt)
+
+def should_generate_sql(state: NLToSQLState) -> Literal["generate_sql", "finish"]:
+    if state.get("selected_tables"):
+        return "generate_sql"
+    return "finish"
+
+
+def generate_sql_node(state: NLToSQLState):
+    sql_prompt = create_sql_prompt(state["sql_context"], state["user_question"])
+    sql_response_text = gemini_call(state["model_name"], sql_prompt)
     sql_response = load_string_as_json(sql_response_text)
 
     logger.info("Generated SQL: %s", sql_response.get("SQL"))
-    return sql_response
+
+    return {
+        "sql_prompt": sql_prompt,
+        "sql_response_text": sql_response_text,
+        "sql_response": sql_response,
+    }
+
+
+def build_nl_to_sql_graph():
+    graph = StateGraph(NLToSQLState)
+    graph.add_node("load_semantic_layer", load_semantic_layer_node)
+    graph.add_node("route_question", route_question_node)
+    graph.add_node("select_semantic_context", select_semantic_context_node)
+    graph.add_node("generate_sql", generate_sql_node)
+
+    graph.add_edge(START, "load_semantic_layer")
+    graph.add_edge("load_semantic_layer", "route_question")
+    graph.add_edge("route_question", "select_semantic_context")
+    graph.add_conditional_edges(
+        "select_semantic_context",
+        should_generate_sql,
+        {
+            "generate_sql": "generate_sql",
+            "finish": END,
+        },
+    )
+    graph.add_edge("generate_sql", END)
+
+    return graph.compile()
+
+
+NL_TO_SQL_GRAPH = build_nl_to_sql_graph()
+
+
+def generate_sql_for_question(user_question, model_name="gemini-3-flash-preview"):
+    result = NL_TO_SQL_GRAPH.invoke(
+        {
+            "user_question": user_question,
+            "model_name": model_name,
+        }
+    )
+    return result["sql_response"]
 
 if __name__ == "__main__":
     user_question = "How many invoices were raised last month?"

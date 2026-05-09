@@ -1,36 +1,125 @@
+# Semantic Layer for NL-to-SQL on an AP Database
 
 ## Architecture
 
-The app follows a simple NL-to-SQL pipeline:
+```mermaid
+flowchart LR
+    A["User question"] --> B["Streamlit app"]
+    B --> C["Router prompt"]
+    C --> D["Selected tables and metrics"]
+    D --> E["Focused semantic context"]
+    E --> F["SQL generation prompt"]
+    F --> G["Structured JSON response"]
+    G --> H["SQL guardrails"]
+    H --> I["SQLite validation and execution"]
+    I --> J["Result table"]
+    I --> K["Chart planning agent"]
+    K --> L["Plotly chart"]
+```
 
-1. The Streamlit UI in `streamlit_app.py` accepts a natural language question.
-2. `src/pipeline.py` loads `data/semantic_layer.json` and asks Gemini to route the question to relevant semantic-layer tables and metrics.
-3. The same pipeline builds a focused SQL-generation prompt from the selected tables, metrics, join paths, ambiguity rules, and query hints.
-4. Gemini returns a structured SQL response containing the generated SQL, explanation, assumptions, follow-up questions, and chart recommendation.
-5. Before any SQL is executed, `src/02_run_sql_on_sqlite.py` runs regex-based SQL guardrails. The guardrail removes comments and quoted strings, then blocks generated SQL containing `INSERT`, `UPDATE`, or `DELETE`.
-6. If the guardrail passes, the SQL runner validates referenced tables against the SQLite database, checks the query plan with `EXPLAIN QUERY PLAN`, and then executes the query on `data/assignment.db`.
-7. The Streamlit UI displays the generated SQL and the query result.
+## What Is Implemented
 
-This keeps write-operation protection at the SQL execution boundary, so any caller using `run_query()` gets the same guardrail before database access.
+### Semantic Layer
 
-## Example video
-sample input/output demonstrating the solution.
+LLM created semantic layer that takes database schema as input and creates semantic layer json. Prompt is designed to be universal and it can work for any database connected and not just this particular database.
 
-## DB Choice 
+### NLP-to-SQL Pipeline
 
-I have selected SQLite because my laptop will crash for production DBs. Also, most of LLMs are trained on spider dataset, a standard one for NL-to-SQL, it has SQLite SQLs, so they know syntax very well.
+The pipeline is intentionally split into two LLM calls:
 
-## AI Tool Usage
+1. **Router call** - selects only the relevant tables and metrics from the semantic layer.
+2. **SQL generation call** - receives a smaller focused context and generates JSON containing SQL, explanation, assumptions, follow-up questions, and chart hint.
 
-1. Prompt Enhancements 
-I write whatever comes in my mind for a particular prompt and then tell Gemini to make it structured and fix any grammer issues.
+This keeps the SQL prompt smaller, cheaper, and less likely to mix unrelated schema details.
 
-2. Errors
-I did fractional programming where I tell Gemini to give me specific code snippet or function. I put it and check it. I used Github Co-pilot to solve bugs that span over multiple files. 
+### SQL Safety and Validation
 
-3. Inline complition 
-Copilot's inline compelation is pretty helpful while writing manual code.
+Before execution, generated SQL passes through guardrails:
 
-## Self-reflections
+- removes comments and string literals before safety scanning
+- blocks `INSERT`, `UPDATE`, and `DELETE`
+- validates that referenced tables exist in SQLite
+- runs `EXPLAIN QUERY PLAN` before executing
+- catches SQLite errors and returns a readable failure message
 
-Add where I would do different things or imporve if I have time and making it production ready.
+This does not make arbitrary LLM SQL fully production-safe, but it creates a clear execution boundary for the prototype.
+
+### Visualization
+
+After SQL execution, a chart agent inspects the question, SQL chart hint, and result shape. It chooses one of:
+
+- bar chart
+- line chart
+- pie chart
+- scatter chart
+- none
+
+The chart plan is validated against actual result columns before Plotly renders anything.
+
+## Setup
+
+This project uses Python 3.11+ and `uv`.
+
+```bash
+uv sync
+```
+
+Create a `.env` file in the repo root:
+
+```bash
+GEMINI_API_KEY=your_api_key_here
+```
+
+Run the Streamlit app:
+
+```bash
+uv run streamlit run streamlit_app.py
+```
+
+Then open the local Streamlit URL shown in the terminal.
+
+
+## Design Decisions
+
+### SQLite
+
+I used SQLite because it keeps the project easy to run locally. It also makes validation straightforward with `EXPLAIN QUERY PLAN` and avoids requiring a separate database server for review.
+
+### Focused Context Instead of Full Schema Dump
+
+The router step reduces the semantic layer to only relevant tables, metrics, join paths, identity columns, ambiguity rules, and query hints. This is more production-friendly than always sending the full schema because it reduces prompt size and lowers the chance of irrelevant joins.
+
+### Structured Model Output
+
+The model is required to return JSON with fixed fields. This makes the UI and execution path deterministic enough for a prototype: SQL can be extracted, assumptions can be displayed, follow-up questions can be surfaced, and chart hints can be passed to the chart agent.
+
+### Guardrails at the Execution Boundary
+
+The SQL runner owns validation. That way, even if another UI or script calls `run_query()`, the same write-operation block and table validation still apply.
+
+## Known Limitations
+
+- The semantic layer was generated from schema metadata and then used as a prototype artifact. In a real implementation, human should review metric definitions and synonyms.
+- The write guardrail blocks obvious mutation statements, but production systems should use a read-only database user, query timeouts, row limits, and a proper SQL parser.
+- Temporal phrases depend on SQLite `date('now')`, so test results vary with the current date.
+
+## What I Would Improve With More Time
+
+- Add an evaluation harness with 30-50 natural-language questions, expected SQL patterns, and result assertions.
+- Replace regex table extraction with a real SQL parser such as `sqlglot`.
+- Add a query cache keyed by normalized question plus selected semantic-layer context.
+- Add multi-turn context so the user can ask follow-ups like "now break that down by department".
+- Add a review UI for editing the generated semantic layer manually.
+- Run the database through a read-only connection with timeouts and row limits.
+- Add CI checks for prompt JSON parsing, SQL validation, and a few deterministic non-LLM runner tests.
+
+## AI Tools Used
+
+I used AI tools transparently during development:
+
+- Gemini was used inside the application for semantic-layer generation, question routing, SQL generation, and chart planning.
+- ChatGPT/Codex was used to review the assignment expectations, inspect the codebase, and rewrite this README into a clearer submission document.
+- GitHub Copilot was used for inline completions and small bug fixes while writing Python code.
+
+I treated AI output as a draft, then tested and adjusted the project around concrete code paths, prompts, and SQLite execution behavior.
+
