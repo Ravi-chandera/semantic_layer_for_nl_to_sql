@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+from collections import deque
 
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ def build_router_metrics(semantic_layer):
         metrics[metric_name] = {
             "description": metric_info.get("description", "No description available"),
             "synonyms": metric_info.get("synonyms", []),
+            "tables": metric_info.get("tables", []),
         }
 
     return metrics
@@ -83,6 +85,10 @@ def find_required_clarification_rule(semantic_layer, selected_tables, question):
 
         trigger_phrases = rule.get("trigger_phrases") or []
         if any(phrase_matches(normalized_question, phrase) for phrase in trigger_phrases):
+            resolved_by_phrases = rule.get("resolved_by_phrases") or []
+            if any(phrase_matches(normalized_question, phrase) for phrase in resolved_by_phrases):
+                continue
+
             return {
                 "name": rule_name,
                 "rule": rule,
@@ -91,6 +97,106 @@ def find_required_clarification_rule(semantic_layer, selected_tables, question):
             }
 
     return None
+
+
+def metric_source_tables(selected_metrics, semantic_layer):
+    source_tables = []
+    available_tables = set(semantic_layer["tables"].keys())
+
+    for metric in selected_metrics:
+        metric_info = semantic_layer.get("metrics", {}).get(metric, {})
+        for table in metric_info.get("tables") or []:
+            if table in available_tables and table not in source_tables:
+                source_tables.append(table)
+
+    return source_tables
+
+
+def build_relationship_graph(semantic_layer):
+    graph = {table: [] for table in semantic_layer["tables"]}
+
+    def add_edge(left, right, join_condition):
+        if left not in graph or right not in graph:
+            return
+
+        graph[left].append(
+            {
+                "table": right,
+                "join_condition": join_condition,
+            }
+        )
+        graph[right].append(
+            {
+                "table": left,
+                "join_condition": join_condition,
+            }
+        )
+
+    for table_name, table_info in semantic_layer["tables"].items():
+        for relationship in table_info.get("relationships") or []:
+            add_edge(
+                table_name,
+                relationship.get("target_table"),
+                relationship.get("join_condition"),
+            )
+
+    for path_info in semantic_layer.get("join_paths", {}).values():
+        for step in path_info.get("steps") or []:
+            add_edge(step.get("from"), step.get("to"), step.get("on"))
+
+    return graph
+
+
+def shortest_table_path(start_table, end_table, graph):
+    if start_table == end_table:
+        return [start_table]
+
+    queue = deque([(start_table, [start_table])])
+    visited = {start_table}
+
+    while queue:
+        current_table, path = queue.popleft()
+        for edge in graph.get(current_table, []):
+            next_table = edge["table"]
+            if next_table in visited:
+                continue
+
+            next_path = [*path, next_table]
+            if next_table == end_table:
+                return next_path
+
+            visited.add(next_table)
+            queue.append((next_table, next_path))
+
+    return []
+
+
+def expand_selected_tables_for_context(selected_tables, selected_metrics, semantic_layer):
+    expanded_tables = []
+    available_tables = set(semantic_layer["tables"].keys())
+
+    for table in [*selected_tables, *metric_source_tables(selected_metrics, semantic_layer)]:
+        if table in available_tables and table not in expanded_tables:
+            expanded_tables.append(table)
+
+    graph = build_relationship_graph(semantic_layer)
+    original_tables = list(expanded_tables)
+
+    for index, left_table in enumerate(original_tables):
+        for right_table in original_tables[index + 1:]:
+            path = shortest_table_path(left_table, right_table, graph)
+            for table in path:
+                if table not in expanded_tables:
+                    expanded_tables.append(table)
+
+    if expanded_tables != selected_tables:
+        logger.info(
+            "Expanded selected tables from %s to %s using metrics and relationship paths.",
+            selected_tables,
+            expanded_tables,
+        )
+
+    return expanded_tables
 
 
 def filter_join_paths_for_tables(selected_tables, semantic_layer):

@@ -1,4 +1,5 @@
 import os
+import time
 import uuid
 
 from dotenv import load_dotenv
@@ -57,6 +58,7 @@ from pipeline_semantic_context import (
     build_router_tables,
     build_sql_context,
     entity_alias_for_table,
+    expand_selected_tables_for_context,
     filter_join_paths_for_tables,
     find_required_clarification_rule,
     label_alias_for_entity,
@@ -133,13 +135,34 @@ def gemini_call(model_name, contents, trace_name="gemini-generate-content"):
         input={"prompt": contents},
         model_parameters=model_parameters,
     ) as generation:
-        response = client.models.generate_content(
-            model=model_name,
-            contents=contents,
-            config=model_parameters,
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                    config=model_parameters,
+                )
+                safe_update_observation(generation, output=response.text)
+                return response.text
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    "Gemini call failed for %s on attempt %s/3: %s",
+                    trace_name,
+                    attempt,
+                    e,
+                )
+                if attempt < 3:
+                    time.sleep(1.5 * attempt)
+
+        safe_update_observation(
+            generation,
+            output={"error": str(last_error)},
+            level="ERROR",
+            status_message=str(last_error),
         )
-        safe_update_observation(generation, output=response.text)
-        return response.text
+        raise last_error
 
 
 def load_json(file_path):
@@ -473,6 +496,11 @@ def select_semantic_context_node(state: NLToSQLState):
 
         selected_tables = select_valid_tables(router_response, semantic_layer)
         selected_metrics = select_valid_metrics(router_response, semantic_layer)
+        selected_tables = expand_selected_tables_for_context(
+            selected_tables,
+            selected_metrics,
+            semantic_layer,
+        )
 
         if not selected_tables:
             logger.warning("No valid tables selected, skipping SQL generation")

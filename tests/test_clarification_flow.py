@@ -17,6 +17,7 @@ from pipeline import (  # noqa: E402
 )
 from pipeline_config import SEMANTIC_LAYER_PATH  # noqa: E402
 from pipeline_semantic_context import find_required_clarification_rule  # noqa: E402
+from pipeline_semantic_context import expand_selected_tables_for_context  # noqa: E402
 
 
 class ClarificationFlowTests(unittest.TestCase):
@@ -170,6 +171,50 @@ class ClarificationFlowTests(unittest.TestCase):
             result["cache_lookup"]["matched_rule"],
             "approval_details_ambiguity",
         )
+
+    def test_bridge_tables_are_added_for_department_invoice_queries(self):
+        semantic_layer = load_json(SEMANTIC_LAYER_PATH)
+
+        tables = expand_selected_tables_for_context(
+            ["invoices", "departments"],
+            [],
+            semantic_layer,
+        )
+
+        self.assertIn("invoices", tables)
+        self.assertIn("departments", tables)
+        self.assertIn("purchase_orders", tables)
+
+    def test_metric_source_tables_are_added_when_router_selects_metric_only(self):
+        semantic_layer = load_json(SEMANTIC_LAYER_PATH)
+
+        tables = expand_selected_tables_for_context(
+            [],
+            ["revenue"],
+            semantic_layer,
+        )
+
+        self.assertEqual(tables, ["invoices"])
+
+    def test_top_vendor_question_requires_clarification_until_metric_is_supplied(self):
+        semantic_layer = load_json(SEMANTIC_LAYER_PATH)
+
+        rule = find_required_clarification_rule(
+            semantic_layer,
+            ["vendors"],
+            "Who are our top 5 vendors?",
+        )
+
+        self.assertIsNotNone(rule)
+        self.assertEqual(rule["name"], "top_vendors_ambiguity")
+
+        resolved_rule = find_required_clarification_rule(
+            semantic_layer,
+            ["vendors"],
+            "Who are our top 5 vendors by total invoice value?",
+        )
+
+        self.assertIsNone(resolved_rule)
 
 
 if __name__ == "__main__":

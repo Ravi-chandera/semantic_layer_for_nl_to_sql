@@ -408,6 +408,8 @@ Respond ONLY in JSON format.
 
 Return only table names and metric names from the provided Available Tables and Available Metrics.
 If you are unsure, include the closest available real table, but never invent a new table name.
+When a selected metric lists `tables`, include those source tables in the `tables` array.
+Include obvious bridge tables needed for joins when the user's entities are not directly connected.
 
 Original User Question: "{{original_user_question}}"
 

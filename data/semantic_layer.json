@@ -1000,6 +1000,38 @@
         }
       ]
     },
+    "invoice_to_department": {
+      "description": "Link invoices to the department that raised the source purchase order.",
+      "use_when": "Show me all invoices for the Engineering department.",
+      "steps": [
+        {
+          "from": "invoices",
+          "to": "purchase_orders",
+          "on": "invoices.po_id = purchase_orders.id"
+        },
+        {
+          "from": "purchase_orders",
+          "to": "departments",
+          "on": "purchase_orders.department_id = departments.id"
+        }
+      ]
+    },
+    "invoice_to_product": {
+      "description": "Link invoice headers through invoice line items to billed products.",
+      "use_when": "Which product has the highest total invoiced value?",
+      "steps": [
+        {
+          "from": "invoices",
+          "to": "invoice_line_items",
+          "on": "invoices.id = invoice_line_items.invoice_id"
+        },
+        {
+          "from": "invoice_line_items",
+          "to": "products",
+          "on": "invoice_line_items.product_id = products.id"
+        }
+      ]
+    },
     "po_to_department": {
       "description": "Check which department requested an order.",
       "use_when": "Which department ordered the Cloud Hosting service?",
@@ -1026,38 +1058,51 @@
   "metrics": {
     "total_spend": {
       "description": "Total amount paid to all vendors.",
-      "sql": "SUM(amount)",
+      "sql": "SUM(payments.amount)",
       "filters": null,
       "synonyms": ["total payments", "cash outflow"],
-      "result_unit": "INR"
+      "result_unit": "INR",
+      "tables": ["payments"]
     },
     "total_liability": {
       "description": "Total amount of all unpaid or pending invoices.",
-      "sql": "SUM(grand_total)",
-      "filters": "status != 'paid'",
-      "synonyms": ["outstanding balance", "accounts payable"],
-      "result_unit": "INR"
+      "sql": "SUM(invoices.grand_total)",
+      "filters": "invoices.status IN ('approved','validated','on_hold','partially_paid','received')",
+      "synonyms": ["outstanding", "outstanding balance", "accounts payable", "unpaid amount"],
+      "result_unit": "INR",
+      "tables": ["invoices"]
+    },
+    "revenue": {
+      "description": "Total value of paid invoices.",
+      "sql": "SUM(invoices.grand_total)",
+      "filters": "invoices.status = 'paid'",
+      "synonyms": ["paid invoice value", "realized invoice value", "paid bills"],
+      "result_unit": "INR",
+      "tables": ["invoices"]
     },
     "average_invoice_value": {
       "description": "The mean total of vendor bills.",
-      "sql": "AVG(grand_total)",
+      "sql": "AVG(invoices.grand_total)",
       "filters": null,
       "synonyms": ["mean bill size"],
-      "result_unit": "INR"
+      "result_unit": "INR",
+      "tables": ["invoices"]
     },
     "rejection_rate": {
       "description": "Percentage of received goods that were rejected.",
-      "sql": "SUM(quantity_rejected) * 100.0 / NULLIF(SUM(quantity_received + quantity_rejected), 0)",
+      "sql": "SUM(grn_line_items.quantity_rejected) * 100.0 / NULLIF(SUM(grn_line_items.quantity_received + grn_line_items.quantity_rejected), 0)",
       "filters": null,
       "synonyms": ["defect rate", "return percentage"],
-      "result_unit": "percentage"
+      "result_unit": "percentage",
+      "tables": ["grn_line_items"]
     },
     "order_fulfillment_count": {
       "description": "Number of closed purchase orders.",
-      "sql": "COUNT(id)",
-      "filters": "status = 'closed'",
+      "sql": "COUNT(purchase_orders.id)",
+      "filters": "purchase_orders.status = 'closed'",
       "synonyms": ["completed orders"],
-      "result_unit": "count"
+      "result_unit": "count",
+      "tables": ["purchase_orders"]
     }
   },
   "synonyms": {
@@ -1070,6 +1115,8 @@
     },
     "status_synonyms": {
       "overdue": "due_date < date('now') AND status != 'paid'",
+      "unpaid": "status != 'paid'",
+      "outstanding": "status IN ('approved','validated','on_hold','partially_paid','received')",
       "pending approval": "status = 'validated' AND approved_by IS NULL",
       "disputed": "deviation_type IS NOT NULL",
       "urgent": "due_date <= date('now', '+3 days') AND status != 'paid'"
@@ -1084,6 +1131,31 @@
         "description": "Transactions in the previous calendar month",
         "sql_template": "strftime('%Y-%m', {col}) = strftime('%Y-%m', 'now', '-1 month')",
         "example": "spend last month"
+      },
+      "this_quarter": {
+        "description": "Transactions in the current calendar quarter",
+        "sql_template": "{col} >= date('now', 'start of month', '-' || ((CAST(strftime('%m', 'now') AS INTEGER) - 1) % 3) || ' months') AND {col} < date(date('now', 'start of month', '-' || ((CAST(strftime('%m', 'now') AS INTEGER) - 1) % 3) || ' months'), '+3 months')",
+        "example": "invoice volume this quarter"
+      },
+      "last_quarter": {
+        "description": "Transactions in the previous calendar quarter",
+        "sql_template": "{col} >= date(date('now', 'start of month', '-' || ((CAST(strftime('%m', 'now') AS INTEGER) - 1) % 3) || ' months'), '-3 months') AND {col} < date('now', 'start of month', '-' || ((CAST(strftime('%m', 'now') AS INTEGER) - 1) % 3) || ' months')",
+        "example": "revenue last quarter"
+      },
+      "this_year": {
+        "description": "Transactions in the current calendar year",
+        "sql_template": "strftime('%Y', {col}) = strftime('%Y', 'now')",
+        "example": "invoices this year"
+      },
+      "last_year": {
+        "description": "Transactions in the previous calendar year",
+        "sql_template": "strftime('%Y', {col}) = strftime('%Y', 'now', '-1 year')",
+        "example": "spend last year"
+      },
+      "last_7_days": {
+        "description": "Transactions in the last 7 days",
+        "sql_template": "{col} >= date('now', '-7 days') AND {col} <= date('now')",
+        "example": "payments in the last 7 days"
       },
       "ytd": {
         "description": "Year to date transactions",
@@ -1152,6 +1224,32 @@
       "clarification_question": "Do you want approval threshold bands or approver contact details?",
       "default_assumption": null,
       "reason": "Approval details can mean threshold bands or approver contact information, and those produce different result sets."
+    },
+    "top_vendors_ambiguity": {
+      "trigger_phrases": ["top vendors", "top 5 vendors", "best vendors", "leading vendors"],
+      "resolved_by_phrases": ["by total invoice value", "by invoice value", "by spend", "by payment value", "by invoice count", "by rating", "by on-time payment"],
+      "applies_to_tables": ["vendors"],
+      "ambiguous_dimensions": [
+        {
+          "label": "invoice_value",
+          "sql_hint": "SUM(invoices.grand_total) grouped by vendors.id"
+        },
+        {
+          "label": "invoice_count",
+          "sql_hint": "COUNT(invoices.id) grouped by vendors.id"
+        },
+        {
+          "label": "vendor_rating",
+          "sql_hint": "vendors.rating"
+        },
+        {
+          "label": "payment_value",
+          "sql_hint": "SUM(payments.amount) grouped by vendors.id through invoices"
+        }
+      ],
+      "clarification_question": "Should I rank the top vendors by total invoice value, invoice count, payment value, or vendor rating?",
+      "default_assumption": null,
+      "reason": "Top vendors can mean highest invoice value, most invoices, highest paid amount, or best vendor rating."
     }
   },
   "query_hints": {
@@ -1159,14 +1257,20 @@
       {
         "name": "vendor_spend_ranking",
         "description": "Rank vendors by total spend amount.",
-        "trigger_phrases": ["top vendors", "highest spend", "rank suppliers"],
+        "trigger_phrases": ["highest spend", "rank suppliers", "rank vendors by total invoice value"],
         "template": "SELECT vendor_id, SUM(grand_total) as total, RANK() OVER (ORDER BY SUM(grand_total) DESC) as spend_rank FROM invoices GROUP BY vendor_id"
       },
       {
         "name": "running_payment_total",
-        "description": "Calculate cumulative spend over time.",
-        "trigger_phrases": ["cumulative spend", "running total"],
-        "template": "SELECT payment_date, amount, SUM(amount) OVER (ORDER BY payment_date) as running_total FROM payments"
+        "description": "Calculate cumulative payments by vendor over time.",
+        "trigger_phrases": ["cumulative payments", "running payment total", "running total of payments"],
+        "template": "SELECT v.id AS vendor_id, v.name AS vendor_name, p.payment_date, p.amount, SUM(p.amount) OVER (PARTITION BY v.id ORDER BY p.payment_date, p.id) AS running_payment_total FROM payments p JOIN invoices i ON p.invoice_id = i.id JOIN vendors v ON i.vendor_id = v.id"
+      },
+      {
+        "name": "previous_invoice_amount",
+        "description": "Show each invoice with the previous invoice amount for the same vendor.",
+        "trigger_phrases": ["previous invoice amount", "prior invoice amount", "lag invoice"],
+        "template": "SELECT i.id AS invoice_id, i.invoice_number, v.id AS vendor_id, v.name AS vendor_name, i.grand_total, LAG(i.grand_total) OVER (PARTITION BY i.vendor_id ORDER BY i.invoice_date, i.id) AS previous_invoice_amount FROM invoices i JOIN vendors v ON i.vendor_id = v.id"
       }
     ],
     "common_patterns": [
