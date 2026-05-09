@@ -4,6 +4,7 @@ import json
 import logging
 from pathlib import Path
 
+from logging_config import configure_logging
 from prompt import ROUTER_PROMPT, SQL_GENERATION_PROMPT
 
 load_dotenv()
@@ -11,7 +12,7 @@ load_dotenv()
 ROOT_DIR = Path(__file__).resolve().parents[1]
 SEMANTIC_LAYER_PATH = ROOT_DIR / "data" / "semantic_layer.json"
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+configure_logging()
 logger = logging.getLogger(__name__)
 
 client = genai.Client()

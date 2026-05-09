@@ -3,10 +3,12 @@ import logging
 import re
 from pathlib import Path
 
+from logging_config import configure_logging
+
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DB_PATH = ROOT_DIR / "data" / "assignment.db"
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+configure_logging()
 logger = logging.getLogger(__name__)
 
 
