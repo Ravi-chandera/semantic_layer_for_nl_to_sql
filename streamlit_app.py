@@ -260,6 +260,16 @@ def render_assistant_message(message):
 
     show_sql_generation_output(sql_output)
 
+    if sql_output.get("Requires_Clarification"):
+        st.subheader("Clarification Needed")
+        st.info(sql_output.get("Clarification_Question") or sql_output.get("Followup_Questions"))
+        return
+
+    if sql_output.get("Clarification_Limit_Reached"):
+        st.subheader("Clarification Limit Reached")
+        st.warning(sql_output.get("Assumptions") or "The question is still underspecified.")
+        return
+
     generated_sql = sql_output.get("SQL")
     if generated_sql:
         st.subheader("Generated SQL")
@@ -340,7 +350,7 @@ if submitted_question:
             st.markdown(user_question)
 
         with st.chat_message("assistant"):
-            with st.spinner("Generating SQL, running query, and planning chart..."):
+            with st.spinner("Checking question clarity, generating SQL, running query, and planning chart..."):
                 try:
                     (
                         sql_output,

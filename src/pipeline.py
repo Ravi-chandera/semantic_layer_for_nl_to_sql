@@ -14,7 +14,12 @@ from langgraph.graph import END, START, StateGraph
 from cache_store import delete_cache_entry, lookup_cache, semantic_layer_hash, store_cache_entry
 from logging_config import configure_logging
 from langfuse_tracing import safe_update_observation, traced_generation, traced_span
-from prompt import QUESTION_RESOLUTION_PROMPT, ROUTER_PROMPT, SQL_GENERATION_PROMPT
+from prompt import (
+    CLARIFICATION_PROMPT,
+    QUESTION_RESOLUTION_PROMPT,
+    ROUTER_PROMPT,
+    SQL_GENERATION_PROMPT,
+)
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 SEMANTIC_LAYER_PATH = ROOT_DIR / "data" / "semantic_layer.json"
@@ -22,6 +27,7 @@ MAX_MEMORY_TURNS = 6
 MAX_MEMORY_SQL_CHARS = 1600
 MAX_MEMORY_FIELD_CHARS = 600
 RESULT_SAMPLE_ROWS = 3
+MAX_CLARIFICATION_ATTEMPTS = 1
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -43,6 +49,11 @@ class NLToSQLState(TypedDict, total=False):
     selected_tables: list[str]
     selected_metrics: list[str]
     sql_context: str
+    clarification_prompt: str
+    clarification_response_text: str
+    clarification_response: dict[str, Any]
+    clarification_attempts: int
+    clarification_blocks_sql: bool
     sql_prompt: str
     sql_response_text: str
     sql_response: dict[str, Any]
@@ -153,6 +164,10 @@ def compact_turn_for_memory(turn):
         "explanation": truncate_text(turn.get("explanation"), MAX_MEMORY_FIELD_CHARS),
         "assumptions": truncate_text(turn.get("assumptions"), MAX_MEMORY_FIELD_CHARS),
         "followup_questions": truncate_text(turn.get("followup_questions"), MAX_MEMORY_FIELD_CHARS),
+        "requires_clarification": turn.get("requires_clarification", False),
+        "clarification_question": truncate_text(turn.get("clarification_question"), MAX_MEMORY_FIELD_CHARS),
+        "clarification_attempts": turn.get("clarification_attempts", 0),
+        "clarification_limit_reached": turn.get("clarification_limit_reached", False),
         "chart": turn.get("chart"),
         "result_summary": turn.get("result_summary"),
         "cache_hit": turn.get("cache_hit", False),
@@ -189,6 +204,21 @@ def active_conversation_context(state: NLToSQLState):
         return state.get("conversation_context", "No prior conversation.")
 
     return "No prior conversation is relevant to this turn."
+
+
+def sql_generation_conversation_context(state: NLToSQLState):
+    conversation_context = active_conversation_context(state)
+    clarification_response = state.get("clarification_response", {})
+    default_assumption = clarification_response.get("default_assumption")
+
+    if default_assumption:
+        return (
+            f"{conversation_context}\n\n"
+            "Current turn clarification default assumption:\n"
+            f"{default_assumption}"
+        )
+
+    return conversation_context
 
 
 def build_router_tables(semantic_layer):
@@ -378,28 +408,111 @@ def create_sql_prompt(context, user_question, conversation_context, original_use
     )
 
 
-def no_valid_tables_response():
+def create_clarification_prompt(
+    context,
+    user_question,
+    conversation_context,
+    original_user_question,
+    clarification_attempts,
+):
+    return (
+        CLARIFICATION_PROMPT
+        .replace("{{context}}", context)
+        .replace("{{conversation_context}}", conversation_context)
+        .replace("{{original_user_question}}", original_user_question)
+        .replace("{{user_question}}", user_question)
+        .replace("{{clarification_attempts}}", str(clarification_attempts))
+        .replace("{{max_clarification_attempts}}", str(MAX_CLARIFICATION_ATTEMPTS))
+    )
+
+
+def latest_pending_clarification_turn(conversation_turns):
+    if not conversation_turns:
+        return None
+
+    latest_turn = conversation_turns[-1]
+    if latest_turn.get("requires_clarification") and not latest_turn.get("sql"):
+        return latest_turn
+
+    return None
+
+
+def clarification_attempts_for_current_question(state: NLToSQLState):
+    pending_turn = latest_pending_clarification_turn(state.get("conversation_turns", []))
+    question_resolution = state.get("question_resolution", {})
+
+    if not pending_turn:
+        return 0
+
+    if question_resolution.get("is_follow_up") or question_resolution.get("memory_used"):
+        return int(pending_turn.get("clarification_attempts") or 1)
+
+    return 0
+
+
+def build_sql_response(
+    *,
+    sql,
+    explanation,
+    assumptions,
+    followup_questions=None,
+    chart="none",
+    requires_clarification=False,
+    clarification_question=None,
+    clarification_attempts=0,
+    clarification_limit_reached=False,
+):
     return {
-        "SQL": None,
-        "Explanation": "No valid database table was selected for this question.",
-        "Assumptions": "The router did not map the question to any table present in the semantic layer.",
-        "Followup_Questions": (
+        "SQL": sql,
+        "Explanation": explanation,
+        "Assumptions": assumptions,
+        "Followup_Questions": followup_questions,
+        "Chart": chart,
+        "Requires_Clarification": requires_clarification,
+        "Clarification_Question": clarification_question,
+        "Clarification_Attempts": clarification_attempts,
+        "Clarification_Limit_Reached": clarification_limit_reached,
+    }
+
+
+def no_valid_tables_response():
+    return build_sql_response(
+        sql=None,
+        explanation="No valid database table was selected for this question.",
+        assumptions="The router did not map the question to any table present in the semantic layer.",
+        followup_questions=(
             "Can you rephrase the question using available business entities like invoices, "
             "payments, vendors, purchase orders, products, departments, companies, GRNs, "
             "or approval matrix?"
         ),
-        "Chart": "none",
-    }
+    )
 
 
-def clarification_needed_response(clarifying_question):
-    return {
-        "SQL": None,
-        "Explanation": "The follow-up question could not be resolved safely from conversation memory.",
-        "Assumptions": "No SQL was generated because the latest message is underspecified.",
-        "Followup_Questions": clarifying_question,
-        "Chart": "none",
-    }
+def clarification_needed_response(clarifying_question, clarification_attempts=1, reason=None):
+    return build_sql_response(
+        sql=None,
+        explanation=reason or "The question needs one more business detail before SQL can be generated safely.",
+        assumptions="No SQL was generated because the latest message is underspecified.",
+        followup_questions=clarifying_question,
+        requires_clarification=True,
+        clarification_question=clarifying_question,
+        clarification_attempts=clarification_attempts,
+    )
+
+
+def clarification_limit_response(reason=None):
+    return build_sql_response(
+        sql=None,
+        explanation=(
+            "I could not resolve the question safely after the clarification attempt."
+        ),
+        assumptions=reason or (
+            "No SQL was generated because a required business detail is still missing, "
+            "and the clarification limit has been reached."
+        ),
+        followup_questions=None,
+        clarification_limit_reached=True,
+    )
 
 
 def load_semantic_layer_node(state: NLToSQLState):
@@ -509,7 +622,11 @@ def resolve_question_node(state: NLToSQLState):
         }
 
         if question_resolution.get("clarification_needed"):
-            node_output["sql_response"] = clarification_needed_response(clarifying_question)
+            node_output["sql_response"] = clarification_needed_response(
+                clarifying_question,
+                clarification_attempts=1,
+                reason="The latest message could not be resolved into an answerable analytics question.",
+            )
             node_output["selected_tables"] = []
             node_output["selected_metrics"] = []
 
@@ -677,6 +794,161 @@ def should_generate_sql(state: NLToSQLState) -> Literal["generate_sql", "finish"
     return "finish"
 
 
+def should_evaluate_clarification(state: NLToSQLState) -> Literal["evaluate_clarification", "finish"]:
+    if state.get("selected_tables"):
+        return "evaluate_clarification"
+    return "finish"
+
+
+def evaluate_clarification_node(state: NLToSQLState):
+    with traced_span(
+        "evaluate-clarification-need",
+        input={
+            "original_question": state["user_question"],
+            "resolved_question": state.get("resolved_question") or state["user_question"],
+            "selected_tables": state.get("selected_tables", []),
+            "selected_metrics": state.get("selected_metrics", []),
+        },
+    ) as span:
+        clarification_attempts = clarification_attempts_for_current_question(state)
+        clarification_prompt = create_clarification_prompt(
+            context=state["sql_context"],
+            user_question=state.get("resolved_question") or state["user_question"],
+            conversation_context=active_conversation_context(state),
+            original_user_question=state["user_question"],
+            clarification_attempts=clarification_attempts,
+        )
+
+        try:
+            response_text = gemini_call(
+                state["model_name"],
+                clarification_prompt,
+                trace_name="gemini-clarification-gate",
+            )
+            clarification_response = load_string_as_json(response_text)
+        except Exception as e:
+            logger.warning("Clarification gate failed; continuing to SQL generation: %s", e)
+            node_output = {
+                "clarification_prompt": clarification_prompt,
+                "clarification_response": {
+                    "clarification_needed": False,
+                    "clarifying_question": None,
+                    "can_proceed": True,
+                    "default_assumption": None,
+                    "reason": f"Clarification gate failed: {e}",
+                    "unanswerable": False,
+                },
+                "clarification_attempts": clarification_attempts,
+                "clarification_blocks_sql": False,
+            }
+            safe_update_observation(
+                span,
+                output=node_output,
+                level="WARNING",
+                status_message=f"Clarification gate failed: {e}",
+            )
+            return node_output
+
+        can_proceed = bool(clarification_response.get("can_proceed"))
+        unanswerable = bool(clarification_response.get("unanswerable"))
+        clarification_needed = bool(clarification_response.get("clarification_needed"))
+        clarifying_question = clarification_response.get("clarifying_question")
+        default_assumption = clarification_response.get("default_assumption")
+        reason = clarification_response.get("reason")
+
+        node_output = {
+            "clarification_prompt": clarification_prompt,
+            "clarification_response_text": response_text,
+            "clarification_response": clarification_response,
+            "clarification_attempts": clarification_attempts,
+            "clarification_blocks_sql": False,
+        }
+
+        if clarification_needed and clarification_attempts < MAX_CLARIFICATION_ATTEMPTS:
+            next_attempt = clarification_attempts + 1
+            if not clarifying_question:
+                clarifying_question = "Can you clarify the business meaning you want analyzed?"
+
+            node_output["sql_response"] = clarification_needed_response(
+                clarifying_question,
+                clarification_attempts=next_attempt,
+                reason=reason,
+            )
+            node_output["clarification_blocks_sql"] = True
+            safe_update_observation(span, output=node_output)
+            return node_output
+
+        if clarification_needed and clarification_attempts >= MAX_CLARIFICATION_ATTEMPTS:
+            if default_assumption or can_proceed:
+                clarification_response["clarification_needed"] = False
+                clarification_response["can_proceed"] = True
+                clarification_response["default_assumption"] = default_assumption or (
+                    "Proceeding with the safest available semantic-layer default."
+                )
+                safe_update_observation(span, output=node_output)
+                return node_output
+
+            node_output["sql_response"] = clarification_limit_response(reason)
+            node_output["clarification_blocks_sql"] = True
+            safe_update_observation(
+                span,
+                output=node_output,
+                level="WARNING",
+                status_message="Clarification limit reached.",
+            )
+            return node_output
+
+        if unanswerable and not can_proceed:
+            node_output["sql_response"] = clarification_limit_response(reason)
+            node_output["clarification_blocks_sql"] = True
+            safe_update_observation(
+                span,
+                output=node_output,
+                level="WARNING",
+                status_message="Question marked unanswerable by clarification gate.",
+            )
+            return node_output
+
+        safe_update_observation(span, output=node_output)
+        return node_output
+
+
+def should_generate_sql_after_clarification(state: NLToSQLState) -> Literal["generate_sql", "finish"]:
+    if state.get("clarification_blocks_sql"):
+        return "finish"
+    if state.get("selected_tables"):
+        return "generate_sql"
+    return "finish"
+
+
+def normalize_sql_response_after_generation(sql_response, state: NLToSQLState):
+    sql_response = dict(sql_response)
+    if sql_response.get("SQL"):
+        sql_response.setdefault("Requires_Clarification", False)
+        sql_response.setdefault("Clarification_Question", None)
+        sql_response.setdefault("Clarification_Attempts", clarification_attempts_for_current_question(state))
+        sql_response.setdefault("Clarification_Limit_Reached", False)
+        return sql_response
+
+    followup_question = sql_response.get("Followup_Questions")
+    if not followup_question:
+        sql_response.setdefault("Requires_Clarification", False)
+        sql_response.setdefault("Clarification_Question", None)
+        sql_response.setdefault("Clarification_Attempts", clarification_attempts_for_current_question(state))
+        sql_response.setdefault("Clarification_Limit_Reached", False)
+        return sql_response
+
+    clarification_attempts = clarification_attempts_for_current_question(state)
+    if clarification_attempts >= MAX_CLARIFICATION_ATTEMPTS:
+        return clarification_limit_response(sql_response.get("Explanation") or sql_response.get("Assumptions"))
+
+    return clarification_needed_response(
+        followup_question,
+        clarification_attempts=clarification_attempts + 1,
+        reason=sql_response.get("Explanation"),
+    )
+
+
 def generate_sql_node(state: NLToSQLState):
     with traced_span(
         "generate-sql",
@@ -690,7 +962,7 @@ def generate_sql_node(state: NLToSQLState):
         sql_prompt = create_sql_prompt(
             context=state["sql_context"],
             user_question=state.get("resolved_question") or state["user_question"],
-            conversation_context=active_conversation_context(state),
+            conversation_context=sql_generation_conversation_context(state),
             original_user_question=state["user_question"],
         )
         sql_response_text = gemini_call(
@@ -699,6 +971,7 @@ def generate_sql_node(state: NLToSQLState):
             trace_name="gemini-sql-generation",
         )
         sql_response = load_string_as_json(sql_response_text)
+        sql_response = normalize_sql_response_after_generation(sql_response, state)
 
         logger.info("Generated SQL: %s", sql_response.get("SQL"))
 
@@ -752,6 +1025,7 @@ def remember_turn_node(state: NLToSQLState):
         sql_response = state.get("sql_response", {})
         question_resolution = state.get("question_resolution", {})
         previous_turns = state.get("conversation_turns", [])
+        requires_clarification = bool(sql_response.get("Requires_Clarification"))
         new_turn = {
             "user_question": state["user_question"],
             "resolved_question": state.get("resolved_question") or state["user_question"],
@@ -763,6 +1037,10 @@ def remember_turn_node(state: NLToSQLState):
             "explanation": sql_response.get("Explanation"),
             "assumptions": sql_response.get("Assumptions"),
             "followup_questions": sql_response.get("Followup_Questions"),
+            "requires_clarification": requires_clarification,
+            "clarification_question": sql_response.get("Clarification_Question"),
+            "clarification_attempts": sql_response.get("Clarification_Attempts", 0),
+            "clarification_limit_reached": sql_response.get("Clarification_Limit_Reached", False),
             "chart": sql_response.get("Chart"),
             "cache_hit": state.get("cache_hit", False),
             "cache_strategy": state.get("cache_strategy"),
@@ -786,6 +1064,7 @@ def build_nl_to_sql_graph(checkpointer=None):
     graph.add_node("lookup_cache", lookup_cache_node)
     graph.add_node("route_question", route_question_node)
     graph.add_node("select_semantic_context", select_semantic_context_node)
+    graph.add_node("evaluate_clarification", evaluate_clarification_node)
     graph.add_node("generate_sql", generate_sql_node)
     graph.add_node("store_cache", store_cache_node)
     graph.add_node("remember_turn", remember_turn_node)
@@ -805,7 +1084,15 @@ def build_nl_to_sql_graph(checkpointer=None):
     graph.add_edge("route_question", "select_semantic_context")
     graph.add_conditional_edges(
         "select_semantic_context",
-        should_generate_sql,
+        should_evaluate_clarification,
+        {
+            "evaluate_clarification": "evaluate_clarification",
+            "finish": "remember_turn",
+        },
+    )
+    graph.add_conditional_edges(
+        "evaluate_clarification",
+        should_generate_sql_after_clarification,
         {
             "generate_sql": "generate_sql",
             "finish": "remember_turn",
@@ -847,6 +1134,15 @@ def generate_sql_for_question(user_question, model_name="gemini-3-flash-preview"
     sql_response["Cache_Hit"] = result.get("cache_hit", False)
     sql_response["Cache_Strategy"] = result.get("cache_strategy")
     sql_response["Cache_Score"] = result.get("cache_score")
+
+    clarification_response = result.get("clarification_response", {})
+    sql_response["Clarification_Decision"] = clarification_response or None
+    sql_response["Requires_Clarification"] = bool(sql_response.get("Requires_Clarification"))
+    sql_response["Clarification_Question"] = sql_response.get("Clarification_Question")
+    sql_response["Clarification_Attempts"] = sql_response.get("Clarification_Attempts", 0)
+    sql_response["Clarification_Limit_Reached"] = bool(
+        sql_response.get("Clarification_Limit_Reached", False)
+    )
 
     return sql_response
 

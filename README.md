@@ -11,7 +11,9 @@ flowchart LR
     X --> E["Router prompt"]
     X --> I["Cached structured JSON response"]
     E --> F["Selected tables and metrics"]
-    F --> G["Focused semantic context"]
+    F --> Q["Clarification gate"]
+    Q --> G["Focused semantic context"]
+    Q --> R["Clarifying question"]
     G --> H["SQL generation prompt"]
     H --> I["Structured JSON response"]
     H --> Y["Cache store"]
@@ -34,9 +36,12 @@ The core NL-to-SQL flow is intentionally split into focused LLM calls:
 
 1. **Question resolver call for follow-ups** - rewrites a conversational follow-up into a standalone business question using LangGraph thread memory.
 2. **Router call** - selects only the relevant tables and metrics from the semantic layer.
-3. **SQL generation call** - receives a smaller focused context and generates JSON containing SQL, explanation, assumptions, follow-up questions, and chart hint.
+3. **Clarification gate** - decides whether the question is answerable now, should use a safe semantic-layer default, or must ask one targeted clarifying question.
+4. **SQL generation call** - receives a smaller focused context and generates JSON containing SQL, explanation, assumptions, follow-up questions, and chart hint.
 
 This keeps the SQL prompt smaller, cheaper, and less likely to mix unrelated schema details.
+
+Clarification attempts are capped at one per unresolved question. If the user reply is still underspecified, the pipeline proceeds with a safe default when one exists; otherwise it stops without generating SQL instead of entering a clarification loop.
 
 ### NL-to-SQL Cache
 
