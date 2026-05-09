@@ -9,6 +9,7 @@ from pathlib import Path
 import plotly.express as px
 
 from logging_config import configure_logging
+from langfuse_tracing import safe_update_observation, traced_generation, traced_span
 from prompt import CHART_AGENT_PROMPT
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -33,17 +34,23 @@ CHART_FUNCTION_ALIASES = {
 }
 
 
-def gemini_call(model_name, contents):
+def gemini_call(model_name, contents, trace_name="gemini-chart-planner"):
     load_dotenv(override=True)
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY is not set. Update your .env file or environment variables.")
 
     client = genai.Client(api_key=api_key)
-    response = client.models.generate_content(
-        model=model_name, contents=contents
-    )
-    return response.text
+    with traced_generation(
+        trace_name,
+        model_name,
+        input={"prompt": contents},
+    ) as generation:
+        response = client.models.generate_content(
+            model=model_name, contents=contents
+        )
+        safe_update_observation(generation, output=response.text)
+        return response.text
 
 
 def load_string_as_json(input_string):
@@ -190,15 +197,36 @@ def save_chart_html(fig):
 
 
 def generate_chart_for_result(user_question, chart_hint, sql_result, model_name="gemini-3-flash-preview"):
-    if not is_chart_requested(chart_hint) or not is_chartable_result(sql_result):
-        return None, None, None
+    with traced_span(
+        "plan-and-render-chart",
+        input={
+            "user_question": user_question,
+            "chart_hint": chart_hint,
+            "result_row_count": len(sql_result) if isinstance(sql_result, list) else None,
+        },
+    ) as span:
+        if not is_chart_requested(chart_hint) or not is_chartable_result(sql_result):
+            output = {
+                "chart_created": False,
+                "reason": "Chart was not requested or SQL result is not chartable.",
+            }
+            safe_update_observation(span, output=output)
+            return None, None, None
 
-    chart_prompt = create_chart_prompt(user_question, chart_hint, sql_result)
-    chart_response_text = gemini_call(model_name, chart_prompt)
-    chart_plan = validate_chart_plan(load_string_as_json(chart_response_text), sql_result)
-    logger.info("Chart agent plan: %s", chart_plan)
+        chart_prompt = create_chart_prompt(user_question, chart_hint, sql_result)
+        chart_response_text = gemini_call(model_name, chart_prompt)
+        chart_plan = validate_chart_plan(load_string_as_json(chart_response_text), sql_result)
+        logger.info("Chart agent plan: %s", chart_plan)
 
-    fig = build_chart_from_plan(sql_result, chart_plan)
-    chart_path = save_chart_html(fig) if fig else None
+        fig = build_chart_from_plan(sql_result, chart_plan)
+        chart_path = save_chart_html(fig) if fig else None
 
-    return fig, chart_plan, chart_path
+        safe_update_observation(
+            span,
+            output={
+                "chart_created": fig is not None,
+                "chart_plan": chart_plan,
+                "chart_path": str(chart_path) if chart_path else None,
+            },
+        )
+        return fig, chart_plan, chart_path
