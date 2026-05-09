@@ -5,16 +5,18 @@
 ```mermaid
 flowchart LR
     A["User question"] --> B["Streamlit app"]
-    B --> C["Router prompt"]
-    C --> D["Selected tables and metrics"]
-    D --> E["Focused semantic context"]
-    E --> F["SQL generation prompt"]
-    F --> G["Structured JSON response"]
-    G --> H["SQL guardrails"]
-    H --> I["SQLite validation and execution"]
-    I --> J["Result table"]
-    I --> K["Chart planning agent"]
-    K --> L["Plotly chart"]
+    B --> C["LangGraph thread memory"]
+    C --> D["Standalone question resolver"]
+    D --> E["Router prompt"]
+    E --> F["Selected tables and metrics"]
+    F --> G["Focused semantic context"]
+    G --> H["SQL generation prompt"]
+    H --> I["Structured JSON response"]
+    I --> J["SQL guardrails"]
+    J --> K["SQLite validation and execution"]
+    K --> L["Result table"]
+    K --> M["Chart planning agent"]
+    M --> N["Plotly chart"]
 ```
 
 ## What Is Implemented
@@ -25,12 +27,19 @@ LLM created semantic layer that takes database schema as input and creates seman
 
 ### NLP-to-SQL Pipeline
 
-The pipeline is intentionally split into two LLM calls:
+The core NL-to-SQL flow is intentionally split into focused LLM calls:
 
-1. **Router call** - selects only the relevant tables and metrics from the semantic layer.
-2. **SQL generation call** - receives a smaller focused context and generates JSON containing SQL, explanation, assumptions, follow-up questions, and chart hint.
+1. **Question resolver call for follow-ups** - rewrites a conversational follow-up into a standalone business question using LangGraph thread memory.
+2. **Router call** - selects only the relevant tables and metrics from the semantic layer.
+3. **SQL generation call** - receives a smaller focused context and generates JSON containing SQL, explanation, assumptions, follow-up questions, and chart hint.
 
 This keeps the SQL prompt smaller, cheaper, and less likely to mix unrelated schema details.
+
+### Multi-Turn Follow-Ups
+
+The LangGraph pipeline now uses thread-scoped in-memory checkpoints. Streamlit creates one `thread_id` per browser session, so users can ask follow-up questions like "now break that down by department" without mixing context across sessions.
+
+Each turn stores a compact memory record containing the original question, resolved standalone question, selected tables and metrics, generated SQL, assumptions, chart hint, clarifying question text, and a small SQL execution summary. Before routing a follow-up, a resolver node rewrites the latest user message into a complete standalone question using only that thread's recent memory.
 
 ### SQL Safety and Validation
 
@@ -102,13 +111,14 @@ The SQL runner owns validation. That way, even if another UI or script calls `ru
 - The semantic layer was generated from schema metadata and then used as a prototype artifact. In a real implementation, human should review metric definitions and synonyms.
 - The write guardrail blocks obvious mutation statements, but production systems should use a read-only database user, query timeouts, row limits, and a proper SQL parser.
 - Temporal phrases depend on SQLite `date('now')`, so test results vary with the current date.
+- Conversation memory is in-process only. Restarting Streamlit clears memory; production deployments should use a persistent LangGraph checkpointer.
 
 ## What I Would Improve With More Time
 
 - Add an evaluation harness with 30-50 natural-language questions, expected SQL patterns, and result assertions.
 - Replace regex table extraction with a real SQL parser such as `sqlglot`.
 - Add a query cache keyed by normalized question plus selected semantic-layer context.
-- Add multi-turn context so the user can ask follow-ups like "now break that down by department".
+- Add durable multi-user memory backed by a persistent LangGraph checkpointer.
 - Add a review UI for editing the generated semantic layer manually.
 - Run the database through a read-only connection with timeouts and row limits.
 - Add CI checks for prompt JSON parsing, SQL validation, and a few deterministic non-LLM runner tests.
@@ -117,9 +127,8 @@ The SQL runner owns validation. That way, even if another UI or script calls `ru
 
 I used AI tools transparently during development:
 
-- Gemini was used inside the application for semantic-layer generation, question routing, SQL generation, and chart planning.
-- ChatGPT/Codex was used to review the assignment expectations, inspect the codebase, and rewrite this README into a clearer submission document.
+- Used Gemini APP for intial code writing. 
 - GitHub Copilot was used for inline completions and small bug fixes while writing Python code.
+- Codex was used after intial wroking app was ready. For e.g., logger implementation, streamlit app, LangGraph migration etc...
 
 I treated AI output as a draft, then tested and adjusted the project around concrete code paths, prompts, and SQLite execution behavior.
-

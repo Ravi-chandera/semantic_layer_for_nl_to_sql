@@ -1,4 +1,5 @@
 import os
+import uuid
 
 from dotenv import load_dotenv
 from google import genai
@@ -7,13 +8,18 @@ import logging
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from logging_config import configure_logging
-from prompt import ROUTER_PROMPT, SQL_GENERATION_PROMPT
+from prompt import QUESTION_RESOLUTION_PROMPT, ROUTER_PROMPT, SQL_GENERATION_PROMPT
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 SEMANTIC_LAYER_PATH = ROOT_DIR / "data" / "semantic_layer.json"
+MAX_MEMORY_TURNS = 6
+MAX_MEMORY_SQL_CHARS = 1600
+MAX_MEMORY_FIELD_CHARS = 600
+RESULT_SAMPLE_ROWS = 3
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -21,8 +27,14 @@ logger = logging.getLogger(__name__)
 
 class NLToSQLState(TypedDict, total=False):
     user_question: str
+    resolved_question: str
     model_name: str
     semantic_layer: dict[str, Any]
+    conversation_turns: list[dict[str, Any]]
+    conversation_context: str
+    question_resolution_prompt: str
+    question_resolution_response_text: str
+    question_resolution: dict[str, Any]
     router_prompt: str
     router_response_text: str
     router_response: dict[str, Any]
@@ -69,6 +81,96 @@ def load_string_as_json(input_string):
         cleaned_string = cleaned_string.removesuffix("```").strip()
 
     return json.loads(cleaned_string)
+
+
+def truncate_text(value, max_chars):
+    if value is None:
+        return None
+
+    text = str(value)
+    if len(text) <= max_chars:
+        return text
+
+    return f"{text[:max_chars].rstrip()}... [truncated]"
+
+
+def summarize_sql_result(sql_result):
+    if sql_result is None:
+        return {
+            "status": "skipped",
+            "reason": "SQL was not generated or execution was skipped.",
+        }
+
+    if isinstance(sql_result, str):
+        return {
+            "status": "error",
+            "message": truncate_text(sql_result, MAX_MEMORY_FIELD_CHARS),
+        }
+
+    if isinstance(sql_result, list):
+        sample_rows = sql_result[:RESULT_SAMPLE_ROWS]
+        columns = []
+
+        if sample_rows and isinstance(sample_rows[0], dict):
+            columns = list(sample_rows[0].keys())
+
+        return {
+            "status": "ok",
+            "row_count": len(sql_result),
+            "columns": columns,
+            "sample_rows": sample_rows,
+        }
+
+    return {
+        "status": "unknown",
+        "value": truncate_text(sql_result, MAX_MEMORY_FIELD_CHARS),
+    }
+
+
+def compact_turn_for_memory(turn):
+    return {
+        "user_question": truncate_text(turn.get("user_question"), MAX_MEMORY_FIELD_CHARS),
+        "resolved_question": truncate_text(turn.get("resolved_question"), MAX_MEMORY_FIELD_CHARS),
+        "selected_tables": turn.get("selected_tables", []),
+        "selected_metrics": turn.get("selected_metrics", []),
+        "sql": truncate_text(turn.get("sql"), MAX_MEMORY_SQL_CHARS),
+        "explanation": truncate_text(turn.get("explanation"), MAX_MEMORY_FIELD_CHARS),
+        "assumptions": truncate_text(turn.get("assumptions"), MAX_MEMORY_FIELD_CHARS),
+        "followup_questions": truncate_text(turn.get("followup_questions"), MAX_MEMORY_FIELD_CHARS),
+        "chart": turn.get("chart"),
+        "result_summary": turn.get("result_summary"),
+    }
+
+
+def format_conversation_context(conversation_turns):
+    if not conversation_turns:
+        return "No prior conversation."
+
+    formatted_turns = []
+    for index, turn in enumerate(conversation_turns[-MAX_MEMORY_TURNS:], start=1):
+        compact_turn = compact_turn_for_memory(turn)
+        formatted_turns.append(
+            f"Turn {index}:\n{json.dumps(compact_turn, indent=2, default=str)}"
+        )
+
+    return "\n\n".join(formatted_turns)
+
+
+def trim_conversation_turns(conversation_turns):
+    return conversation_turns[-MAX_MEMORY_TURNS:]
+
+
+def active_conversation_context(state: NLToSQLState):
+    question_resolution = state.get("question_resolution", {})
+
+    if (
+        question_resolution.get("is_follow_up")
+        or question_resolution.get("memory_used")
+        or question_resolution.get("clarification_needed")
+    ):
+        return state.get("conversation_context", "No prior conversation.")
+
+    return "No prior conversation is relevant to this turn."
 
 
 def build_router_tables(semantic_layer):
@@ -229,19 +331,31 @@ def build_identity_column_context(semantic_layer):
     return identity_columns
 
 
-def create_router_prompt(semantic_layer, user_question):
+def create_question_resolution_prompt(conversation_context, user_question):
     return (
-        ROUTER_PROMPT
-        .replace("{{list_of_tables_from_semantic_layer}}", json.dumps(build_router_tables(semantic_layer), indent=2))
-        .replace("{{list_of_metrics_from_semantic_layer}}", json.dumps(build_router_metrics(semantic_layer), indent=2))
+        QUESTION_RESOLUTION_PROMPT
+        .replace("{{conversation_context}}", conversation_context)
         .replace("{{user_question}}", user_question)
     )
 
 
-def create_sql_prompt(context, user_question):
+def create_router_prompt(semantic_layer, user_question, conversation_context, original_user_question):
+    return (
+        ROUTER_PROMPT
+        .replace("{{list_of_tables_from_semantic_layer}}", json.dumps(build_router_tables(semantic_layer), indent=2))
+        .replace("{{list_of_metrics_from_semantic_layer}}", json.dumps(build_router_metrics(semantic_layer), indent=2))
+        .replace("{{conversation_context}}", conversation_context)
+        .replace("{{original_user_question}}", original_user_question)
+        .replace("{{user_question}}", user_question)
+    )
+
+
+def create_sql_prompt(context, user_question, conversation_context, original_user_question):
     return (
         SQL_GENERATION_PROMPT
         .replace("{{context}}", context)
+        .replace("{{conversation_context}}", conversation_context)
+        .replace("{{original_user_question}}", original_user_question)
         .replace("{{user_question}}", user_question)
     )
 
@@ -260,16 +374,106 @@ def no_valid_tables_response():
     }
 
 
+def clarification_needed_response(clarifying_question):
+    return {
+        "SQL": None,
+        "Explanation": "The follow-up question could not be resolved safely from conversation memory.",
+        "Assumptions": "No SQL was generated because the latest message is underspecified.",
+        "Followup_Questions": clarifying_question,
+        "Chart": "none",
+    }
+
+
 def load_semantic_layer_node(state: NLToSQLState):
     return {"semantic_layer": load_json(SEMANTIC_LAYER_PATH)}
 
 
+def prepare_memory_context_node(state: NLToSQLState):
+    conversation_turns = state.get("conversation_turns", [])
+    return {"conversation_context": format_conversation_context(conversation_turns)}
+
+
+def resolve_question_node(state: NLToSQLState):
+    user_question = state["user_question"]
+    conversation_turns = state.get("conversation_turns", [])
+    conversation_context = state.get("conversation_context", "No prior conversation.")
+
+    if not conversation_turns:
+        return {
+            "resolved_question": user_question,
+            "question_resolution": {
+                "is_follow_up": False,
+                "standalone_question": user_question,
+                "memory_used": None,
+                "clarification_needed": False,
+                "clarifying_question": None,
+            },
+        }
+
+    question_resolution_prompt = create_question_resolution_prompt(
+        conversation_context,
+        user_question,
+    )
+
+    try:
+        response_text = gemini_call(state["model_name"], question_resolution_prompt)
+        question_resolution = load_string_as_json(response_text)
+    except Exception as e:
+        logger.warning("Question resolution failed; using original question: %s", e)
+        return {
+            "resolved_question": user_question,
+            "question_resolution_prompt": question_resolution_prompt,
+            "question_resolution": {
+                "is_follow_up": False,
+                "standalone_question": user_question,
+                "memory_used": None,
+                "clarification_needed": False,
+                "clarifying_question": None,
+            },
+        }
+
+    resolved_question = str(
+        question_resolution.get("standalone_question") or user_question
+    ).strip()
+    clarifying_question = question_resolution.get("clarifying_question")
+    if question_resolution.get("clarification_needed") and not clarifying_question:
+        clarifying_question = "Can you clarify what you want to analyze?"
+
+    node_output = {
+        "resolved_question": resolved_question or user_question,
+        "question_resolution_prompt": question_resolution_prompt,
+        "question_resolution_response_text": response_text,
+        "question_resolution": question_resolution,
+    }
+
+    if question_resolution.get("clarification_needed"):
+        node_output["sql_response"] = clarification_needed_response(clarifying_question)
+        node_output["selected_tables"] = []
+        node_output["selected_metrics"] = []
+
+    return node_output
+
+
+def should_route_after_resolution(state: NLToSQLState) -> Literal["route_question", "finish"]:
+    question_resolution = state.get("question_resolution", {})
+
+    if question_resolution.get("clarification_needed"):
+        return "finish"
+
+    return "route_question"
+
+
 def route_question_node(state: NLToSQLState):
     semantic_layer = state["semantic_layer"]
-    user_question = state["user_question"]
+    user_question = state.get("resolved_question") or state["user_question"]
     model_name = state["model_name"]
 
-    router_prompt = create_router_prompt(semantic_layer, user_question)
+    router_prompt = create_router_prompt(
+        semantic_layer=semantic_layer,
+        user_question=user_question,
+        conversation_context=active_conversation_context(state),
+        original_user_question=state["user_question"],
+    )
     router_response_text = gemini_call(model_name, router_prompt)
     router_response = load_string_as_json(router_response_text)
 
@@ -311,7 +515,12 @@ def should_generate_sql(state: NLToSQLState) -> Literal["generate_sql", "finish"
 
 
 def generate_sql_node(state: NLToSQLState):
-    sql_prompt = create_sql_prompt(state["sql_context"], state["user_question"])
+    sql_prompt = create_sql_prompt(
+        context=state["sql_context"],
+        user_question=state.get("resolved_question") or state["user_question"],
+        conversation_context=active_conversation_context(state),
+        original_user_question=state["user_question"],
+    )
     sql_response_text = gemini_call(state["model_name"], sql_prompt)
     sql_response = load_string_as_json(sql_response_text)
 
@@ -324,40 +533,127 @@ def generate_sql_node(state: NLToSQLState):
     }
 
 
-def build_nl_to_sql_graph():
+def remember_turn_node(state: NLToSQLState):
+    sql_response = state.get("sql_response", {})
+    question_resolution = state.get("question_resolution", {})
+    previous_turns = state.get("conversation_turns", [])
+    new_turn = {
+        "user_question": state["user_question"],
+        "resolved_question": state.get("resolved_question") or state["user_question"],
+        "is_follow_up": question_resolution.get("is_follow_up", False),
+        "memory_used": question_resolution.get("memory_used"),
+        "selected_tables": state.get("selected_tables", []),
+        "selected_metrics": state.get("selected_metrics", []),
+        "sql": sql_response.get("SQL"),
+        "explanation": sql_response.get("Explanation"),
+        "assumptions": sql_response.get("Assumptions"),
+        "followup_questions": sql_response.get("Followup_Questions"),
+        "chart": sql_response.get("Chart"),
+    }
+
+    return {"conversation_turns": trim_conversation_turns([*previous_turns, new_turn])}
+
+
+def build_nl_to_sql_graph(checkpointer=None):
     graph = StateGraph(NLToSQLState)
     graph.add_node("load_semantic_layer", load_semantic_layer_node)
+    graph.add_node("prepare_memory_context", prepare_memory_context_node)
+    graph.add_node("resolve_question", resolve_question_node)
     graph.add_node("route_question", route_question_node)
     graph.add_node("select_semantic_context", select_semantic_context_node)
     graph.add_node("generate_sql", generate_sql_node)
+    graph.add_node("remember_turn", remember_turn_node)
 
     graph.add_edge(START, "load_semantic_layer")
-    graph.add_edge("load_semantic_layer", "route_question")
+    graph.add_edge("load_semantic_layer", "prepare_memory_context")
+    graph.add_edge("prepare_memory_context", "resolve_question")
+    graph.add_conditional_edges(
+        "resolve_question",
+        should_route_after_resolution,
+        {
+            "route_question": "route_question",
+            "finish": "remember_turn",
+        },
+    )
     graph.add_edge("route_question", "select_semantic_context")
     graph.add_conditional_edges(
         "select_semantic_context",
         should_generate_sql,
         {
             "generate_sql": "generate_sql",
-            "finish": END,
+            "finish": "remember_turn",
         },
     )
-    graph.add_edge("generate_sql", END)
+    graph.add_edge("generate_sql", "remember_turn")
+    graph.add_edge("remember_turn", END)
 
-    return graph.compile()
-
-
-NL_TO_SQL_GRAPH = build_nl_to_sql_graph()
+    return graph.compile(checkpointer=checkpointer)
 
 
-def generate_sql_for_question(user_question, model_name="gemini-3-flash-preview"):
+NL_TO_SQL_MEMORY = InMemorySaver()
+NL_TO_SQL_GRAPH = build_nl_to_sql_graph(checkpointer=NL_TO_SQL_MEMORY)
+
+
+def build_thread_config(thread_id):
+    return {"configurable": {"thread_id": thread_id}}
+
+
+def generate_sql_for_question(user_question, model_name="gemini-3-flash-preview", thread_id=None):
+    resolved_thread_id = thread_id or f"single-turn-{uuid.uuid4()}"
     result = NL_TO_SQL_GRAPH.invoke(
         {
             "user_question": user_question,
             "model_name": model_name,
-        }
+        },
+        build_thread_config(resolved_thread_id),
     )
-    return result["sql_response"]
+    sql_response = dict(result["sql_response"])
+    question_resolution = result.get("question_resolution", {})
+
+    sql_response["Original_Question"] = result.get("user_question")
+    sql_response["Resolved_Question"] = result.get("resolved_question")
+    sql_response["Is_Followup"] = question_resolution.get("is_follow_up", False)
+    sql_response["Memory_Used"] = question_resolution.get("memory_used")
+    sql_response["Selected_Tables"] = result.get("selected_tables", [])
+    sql_response["Selected_Metrics"] = result.get("selected_metrics", [])
+
+    return sql_response
+
+
+def record_sql_execution_for_thread(thread_id, sql_result):
+    if not thread_id:
+        return
+
+    config = build_thread_config(thread_id)
+    snapshot = NL_TO_SQL_GRAPH.get_state(config)
+    values = snapshot.values or {}
+    conversation_turns = list(values.get("conversation_turns", []))
+
+    if not conversation_turns:
+        return
+
+    latest_turn = dict(conversation_turns[-1])
+    latest_turn["result_summary"] = summarize_sql_result(sql_result)
+    conversation_turns[-1] = latest_turn
+    NL_TO_SQL_GRAPH.update_state(
+        config,
+        {"conversation_turns": trim_conversation_turns(conversation_turns)},
+        as_node="remember_turn",
+    )
+
+
+def get_conversation_memory(thread_id):
+    if not thread_id:
+        return []
+
+    snapshot = NL_TO_SQL_GRAPH.get_state(build_thread_config(thread_id))
+    values = snapshot.values or {}
+    return values.get("conversation_turns", [])
+
+
+def clear_conversation_memory(thread_id):
+    if thread_id:
+        NL_TO_SQL_MEMORY.delete_thread(thread_id)
 
 if __name__ == "__main__":
     user_question = "How many invoices were raised last month?"

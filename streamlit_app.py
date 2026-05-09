@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import sys
+import uuid
 from pathlib import Path
 
 import streamlit as st
@@ -12,8 +13,13 @@ SQL_RUNNER_PATH = SRC_DIR / "02_run_sql_on_sqlite.py"
 
 sys.path.append(str(SRC_DIR))
 
-from pipeline import generate_sql_for_question
 from chart_agent import generate_chart_for_result
+from pipeline import (
+    clear_conversation_memory,
+    generate_sql_for_question,
+    get_conversation_memory,
+    record_sql_execution_for_thread,
+)
 
 
 def load_sql_runner():
@@ -23,22 +29,38 @@ def load_sql_runner():
     return sql_runner
 
 
-def run_pipeline(user_question):
-    sql_output = generate_sql_for_question(user_question)
+def init_session_state():
+    if "thread_id" not in st.session_state:
+        st.session_state.thread_id = f"streamlit-{uuid.uuid4()}"
+
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+
+def reset_conversation():
+    clear_conversation_memory(st.session_state.thread_id)
+    st.session_state.thread_id = f"streamlit-{uuid.uuid4()}"
+    st.session_state.messages = []
+
+
+def run_pipeline(user_question, thread_id):
+    sql_output = generate_sql_for_question(user_question, thread_id=thread_id)
     generated_sql = sql_output.get("SQL")
 
     if not generated_sql:
+        record_sql_execution_for_thread(thread_id, None)
         return sql_output, None, None, None, None, None
 
     sql_runner = load_sql_runner()
     sql_result = sql_runner.run_query(generated_sql)
+    record_sql_execution_for_thread(thread_id, sql_result)
 
     if isinstance(sql_result, str):
         return sql_output, sql_result, None, None, None, None
 
     try:
         fig, chart_plan, chart_path = generate_chart_for_result(
-            user_question=user_question,
+            user_question=sql_output.get("Resolved_Question") or user_question,
             chart_hint=sql_output.get("Chart"),
             sql_result=sql_result,
         )
@@ -74,56 +96,109 @@ def show_sql_generation_output(sql_output):
             st.write(value)
 
 
+def render_assistant_message(message):
+    if message.get("error"):
+        st.error(message["error"])
+        return
+
+    sql_output = message["sql_output"]
+    sql_result = message["sql_result"]
+    fig = message.get("fig")
+    chart_plan = message.get("chart_plan")
+    chart_path = message.get("chart_path")
+    chart_error = message.get("chart_error")
+
+    show_sql_generation_output(sql_output)
+
+    generated_sql = sql_output.get("SQL")
+    if generated_sql:
+        st.subheader("Generated SQL")
+        st.code(generated_sql, language="sql")
+
+    st.subheader("SQL Running Result")
+    if sql_result is None:
+        st.info("SQL was not generated, so query execution was skipped.")
+    elif isinstance(sql_result, str):
+        st.error(sql_result)
+    else:
+        st.dataframe(sql_result, use_container_width=True)
+
+    if fig is not None:
+        st.subheader("Chart")
+        st.plotly_chart(fig, use_container_width=True)
+
+        if chart_plan:
+            with st.expander("Chart Agent Plan"):
+                st.json(chart_plan)
+
+        if chart_path:
+            st.caption(f"Stored chart: {chart_path}")
+    elif chart_error:
+        st.warning(f"Chart generation skipped: {chart_error}")
+
+    with st.expander("Raw SQL Running Result"):
+        st.code(json.dumps(sql_result, indent=2, default=str), language="json")
+
+
 st.set_page_config(page_title="NL to SQL", layout="wide")
+init_session_state()
 
 st.title("NL to SQL")
 
-user_question = st.text_area(
-    "Enter your question",
-    placeholder="Example: How many invoices were raised last month?",
-    height=120,
-)
+with st.sidebar:
+    if st.button("New conversation", type="secondary"):
+        reset_conversation()
+        st.rerun()
 
-run_button = st.button("Run Pipeline", type="primary")
+    memory_turns = get_conversation_memory(st.session_state.thread_id)
+    st.caption(f"Memory turns: {len(memory_turns)}")
 
-if run_button:
-    if not user_question.strip():
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        if message["role"] == "user":
+            st.markdown(message["content"])
+        else:
+            render_assistant_message(message)
+
+submitted_question = st.chat_input("Ask a question about the AP data")
+
+if submitted_question:
+    user_question = submitted_question.strip()
+
+    if not user_question:
         st.warning("Please enter a question.")
     else:
-        with st.spinner("Generating SQL, running query, and planning chart..."):
-            try:
-                sql_output, sql_result, fig, chart_plan, chart_path, chart_error = run_pipeline(user_question.strip())
-            except Exception as e:
-                st.error(f"Pipeline failed: {e}")
-                st.stop()
+        user_message = {"role": "user", "content": user_question}
+        st.session_state.messages.append(user_message)
 
-        show_sql_generation_output(sql_output)
+        with st.chat_message("user"):
+            st.markdown(user_question)
 
-        generated_sql = sql_output.get("SQL")
-        if generated_sql:
-            st.subheader("Generated SQL")
-            st.code(generated_sql, language="sql")
+        with st.chat_message("assistant"):
+            with st.spinner("Generating SQL, running query, and planning chart..."):
+                try:
+                    (
+                        sql_output,
+                        sql_result,
+                        fig,
+                        chart_plan,
+                        chart_path,
+                        chart_error,
+                    ) = run_pipeline(user_question, st.session_state.thread_id)
+                    assistant_message = {
+                        "role": "assistant",
+                        "sql_output": sql_output,
+                        "sql_result": sql_result,
+                        "fig": fig,
+                        "chart_plan": chart_plan,
+                        "chart_path": str(chart_path) if chart_path else None,
+                        "chart_error": chart_error,
+                    }
+                except Exception as e:
+                    assistant_message = {
+                        "role": "assistant",
+                        "error": f"Pipeline failed: {e}",
+                    }
 
-        st.subheader("SQL Running Result")
-        if sql_result is None:
-            st.info("SQL was not generated, so query execution was skipped.")
-        elif isinstance(sql_result, str):
-            st.error(sql_result)
-        else:
-            st.dataframe(sql_result, use_container_width=True)
-
-        if fig is not None:
-            st.subheader("Chart")
-            st.plotly_chart(fig, use_container_width=True)
-
-            if chart_plan:
-                with st.expander("Chart Agent Plan"):
-                    st.json(chart_plan)
-
-            if chart_path:
-                st.caption(f"Stored chart: {chart_path}")
-        elif chart_error:
-            st.warning(f"Chart generation skipped: {chart_error}")
-
-        with st.expander("Raw SQL Running Result"):
-            st.code(json.dumps(sql_result, indent=2, default=str), language="json")
+            render_assistant_message(assistant_message)
+            st.session_state.messages.append(assistant_message)
