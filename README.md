@@ -7,11 +7,14 @@ flowchart LR
     A["User question"] --> B["Streamlit app"]
     B --> C["LangGraph thread memory"]
     C --> D["Standalone question resolver"]
-    D --> E["Router prompt"]
+    D --> X["NL-to-SQL cache lookup"]
+    X --> E["Router prompt"]
+    X --> I["Cached structured JSON response"]
     E --> F["Selected tables and metrics"]
     F --> G["Focused semantic context"]
     G --> H["SQL generation prompt"]
     H --> I["Structured JSON response"]
+    H --> Y["Cache store"]
     I --> J["SQL guardrails"]
     J --> K["SQLite validation and execution"]
     K --> L["Result table"]
@@ -35,11 +38,22 @@ The core NL-to-SQL flow is intentionally split into focused LLM calls:
 
 This keeps the SQL prompt smaller, cheaper, and less likely to mix unrelated schema details.
 
+### NL-to-SQL Cache
+
+The app now uses a separate SQLite cache database at `data/nl_to_sql_cache.db`. Cache lookup runs after the follow-up resolver, so conversational inputs are first rewritten into standalone business questions before cache matching.
+
+Either cache strategy can produce a hit:
+
+- **Keyword cache** - matches an exact normalized question first, then a sorted significant-keyword signature for wording changes with the same terms.
+- **Semantic cache** - embeds the resolved question with `BAAI/bge-small-en-v1.5` and treats cosine similarity above `0.98` as a hit.
+
+Cache entries are scoped by a hash of `data/semantic_layer.json`, so stale SQL is not reused after the semantic layer changes. Only SQL-generation responses with a SQL string are cached; clarification prompts and no-table responses are deliberately skipped. If SQLite execution later returns an error, that generated SQL is removed from the cache.
+
 ### Multi-Turn Follow-Ups
 
 The LangGraph pipeline now uses thread-scoped in-memory checkpoints. Streamlit creates one `thread_id` per browser session, so users can ask follow-up questions like "now break that down by department" without mixing context across sessions.
 
-Each turn stores a compact memory record containing the original question, resolved standalone question, selected tables and metrics, generated SQL, assumptions, chart hint, clarifying question text, and a small SQL execution summary. Before routing a follow-up, a resolver node rewrites the latest user message into a complete standalone question using only that thread's recent memory.
+Each turn stores a compact memory record containing the original question, resolved standalone question, selected tables and metrics, generated SQL, assumptions, chart hint, clarifying question text, cache metadata, and a small SQL execution summary. Before routing a follow-up, a resolver node rewrites the latest user message into a complete standalone question using only that thread's recent memory.
 
 ### Langfuse Tracing
 
@@ -100,6 +114,8 @@ uv run streamlit run streamlit_app.py
 
 Then open the local Streamlit URL shown in the terminal.
 
+The first semantic cache write or lookup may download the `BAAI/bge-small-en-v1.5` embedding model through `sentence-transformers`.
+
 
 ## Design Decisions
 
@@ -130,7 +146,6 @@ The SQL runner owns validation. That way, even if another UI or script calls `ru
 
 - Add an evaluation harness with 30-50 natural-language questions, expected SQL patterns, and result assertions.
 - Replace regex table extraction with a real SQL parser such as `sqlglot`.
-- Add a query cache keyed by normalized question plus selected semantic-layer context.
 - Add durable multi-user memory backed by a persistent LangGraph checkpointer.
 - Add a review UI for editing the generated semantic layer manually.
 - Run the database through a read-only connection with timeouts and row limits.

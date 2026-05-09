@@ -11,6 +11,7 @@ from typing import Any, Literal, TypedDict
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
+from cache_store import delete_cache_entry, lookup_cache, semantic_layer_hash, store_cache_entry
 from logging_config import configure_logging
 from langfuse_tracing import safe_update_observation, traced_generation, traced_span
 from prompt import QUESTION_RESOLUTION_PROMPT, ROUTER_PROMPT, SQL_GENERATION_PROMPT
@@ -45,6 +46,11 @@ class NLToSQLState(TypedDict, total=False):
     sql_prompt: str
     sql_response_text: str
     sql_response: dict[str, Any]
+    cache_lookup: dict[str, Any]
+    cache_hit: bool
+    cache_strategy: str
+    cache_score: float
+    cache_store: dict[str, Any]
 
 
 def gemini_call(model_name, contents, trace_name="gemini-generate-content"):
@@ -149,6 +155,8 @@ def compact_turn_for_memory(turn):
         "followup_questions": truncate_text(turn.get("followup_questions"), MAX_MEMORY_FIELD_CHARS),
         "chart": turn.get("chart"),
         "result_summary": turn.get("result_summary"),
+        "cache_hit": turn.get("cache_hit", False),
+        "cache_strategy": turn.get("cache_strategy"),
     }
 
 
@@ -518,6 +526,80 @@ def should_route_after_resolution(state: NLToSQLState) -> Literal["route_questio
     return "route_question"
 
 
+def lookup_cache_node(state: NLToSQLState):
+    with traced_span(
+        "lookup-nl-to-sql-cache",
+        input={
+            "original_question": state["user_question"],
+            "resolved_question": state.get("resolved_question") or state["user_question"],
+        },
+    ) as span:
+        question_resolution = state.get("question_resolution", {})
+        if question_resolution.get("clarification_needed"):
+            node_output = {
+                "cache_hit": False,
+                "cache_lookup": {
+                    "skipped": True,
+                    "reason": "Clarification is needed before SQL generation.",
+                },
+            }
+            safe_update_observation(span, output=node_output)
+            return node_output
+
+        layer_hash = semantic_layer_hash(state["semantic_layer"])
+        resolved_question = state.get("resolved_question") or state["user_question"]
+        hit = lookup_cache(resolved_question, layer_hash)
+
+        if not hit:
+            node_output = {
+                "cache_hit": False,
+                "cache_lookup": {
+                    "skipped": False,
+                    "hit": False,
+                    "semantic_layer_hash": layer_hash,
+                },
+            }
+            safe_update_observation(span, output=node_output)
+            return node_output
+
+        logger.info(
+            "NL-to-SQL cache hit via %s for resolved question: %s",
+            hit["strategy"],
+            resolved_question,
+        )
+        node_output = {
+            "cache_hit": True,
+            "cache_strategy": hit["strategy"],
+            "cache_score": hit["score"],
+            "cache_lookup": {
+                "skipped": False,
+                "hit": True,
+                "cache_id": hit["id"],
+                "strategy": hit["strategy"],
+                "score": hit["score"],
+                "matched_question": hit["question_text"],
+                "semantic_layer_hash": layer_hash,
+            },
+            "sql_response": hit["sql_response"],
+            "selected_tables": hit["selected_tables"],
+            "selected_metrics": hit["selected_metrics"],
+        }
+        safe_update_observation(span, output=node_output)
+        return node_output
+
+
+def should_route_after_cache(state: NLToSQLState) -> Literal["route_question", "finish"]:
+    question_resolution = state.get("question_resolution", {})
+
+    if question_resolution.get("clarification_needed"):
+        return "finish"
+
+    if state.get("cache_hit"):
+        return "finish"
+
+    return "route_question"
+
+
 def route_question_node(state: NLToSQLState):
     with traced_span(
         "route-question-to-semantic-layer",
@@ -629,6 +711,42 @@ def generate_sql_node(state: NLToSQLState):
         return node_output
 
 
+def store_cache_node(state: NLToSQLState):
+    with traced_span(
+        "store-nl-to-sql-cache",
+        input={
+            "original_question": state["user_question"],
+            "resolved_question": state.get("resolved_question") or state["user_question"],
+            "selected_tables": state.get("selected_tables", []),
+            "selected_metrics": state.get("selected_metrics", []),
+        },
+    ) as span:
+        sql_response = state.get("sql_response", {})
+
+        if state.get("cache_hit"):
+            node_output = {
+                "cache_store": {
+                    "stored": False,
+                    "reason": "This turn was served from cache.",
+                },
+            }
+            safe_update_observation(span, output=node_output)
+            return node_output
+
+        cache_store_result = store_cache_entry(
+            question=state.get("resolved_question") or state["user_question"],
+            original_question=state["user_question"],
+            layer_hash=semantic_layer_hash(state["semantic_layer"]),
+            model_name=state["model_name"],
+            sql_response=sql_response,
+            selected_tables=state.get("selected_tables", []),
+            selected_metrics=state.get("selected_metrics", []),
+        )
+        node_output = {"cache_store": cache_store_result}
+        safe_update_observation(span, output=node_output)
+        return node_output
+
+
 def remember_turn_node(state: NLToSQLState):
     with traced_span("remember-conversation-turn") as span:
         sql_response = state.get("sql_response", {})
@@ -646,6 +764,8 @@ def remember_turn_node(state: NLToSQLState):
             "assumptions": sql_response.get("Assumptions"),
             "followup_questions": sql_response.get("Followup_Questions"),
             "chart": sql_response.get("Chart"),
+            "cache_hit": state.get("cache_hit", False),
+            "cache_strategy": state.get("cache_strategy"),
         }
         conversation_turns = trim_conversation_turns([*previous_turns, new_turn])
         safe_update_observation(
@@ -663,17 +783,20 @@ def build_nl_to_sql_graph(checkpointer=None):
     graph.add_node("load_semantic_layer", load_semantic_layer_node)
     graph.add_node("prepare_memory_context", prepare_memory_context_node)
     graph.add_node("resolve_question", resolve_question_node)
+    graph.add_node("lookup_cache", lookup_cache_node)
     graph.add_node("route_question", route_question_node)
     graph.add_node("select_semantic_context", select_semantic_context_node)
     graph.add_node("generate_sql", generate_sql_node)
+    graph.add_node("store_cache", store_cache_node)
     graph.add_node("remember_turn", remember_turn_node)
 
     graph.add_edge(START, "load_semantic_layer")
     graph.add_edge("load_semantic_layer", "prepare_memory_context")
     graph.add_edge("prepare_memory_context", "resolve_question")
+    graph.add_edge("resolve_question", "lookup_cache")
     graph.add_conditional_edges(
-        "resolve_question",
-        should_route_after_resolution,
+        "lookup_cache",
+        should_route_after_cache,
         {
             "route_question": "route_question",
             "finish": "remember_turn",
@@ -688,7 +811,8 @@ def build_nl_to_sql_graph(checkpointer=None):
             "finish": "remember_turn",
         },
     )
-    graph.add_edge("generate_sql", "remember_turn")
+    graph.add_edge("generate_sql", "store_cache")
+    graph.add_edge("store_cache", "remember_turn")
     graph.add_edge("remember_turn", END)
 
     return graph.compile(checkpointer=checkpointer)
@@ -720,6 +844,9 @@ def generate_sql_for_question(user_question, model_name="gemini-3-flash-preview"
     sql_response["Memory_Used"] = question_resolution.get("memory_used")
     sql_response["Selected_Tables"] = result.get("selected_tables", [])
     sql_response["Selected_Metrics"] = result.get("selected_metrics", [])
+    sql_response["Cache_Hit"] = result.get("cache_hit", False)
+    sql_response["Cache_Strategy"] = result.get("cache_strategy")
+    sql_response["Cache_Score"] = result.get("cache_score")
 
     return sql_response
 
@@ -739,6 +866,16 @@ def record_sql_execution_for_thread(thread_id, sql_result):
     latest_turn = dict(conversation_turns[-1])
     latest_turn["result_summary"] = summarize_sql_result(sql_result)
     conversation_turns[-1] = latest_turn
+
+    if isinstance(sql_result, str) and latest_turn.get("sql"):
+        semantic_layer = values.get("semantic_layer")
+        if semantic_layer:
+            delete_result = delete_cache_entry(
+                latest_turn.get("resolved_question") or latest_turn.get("user_question"),
+                semantic_layer_hash(semantic_layer),
+            )
+            logger.info("Removed failed SQL from cache: %s", delete_result)
+
     NL_TO_SQL_GRAPH.update_state(
         config,
         {"conversation_turns": trim_conversation_turns(conversation_turns)},

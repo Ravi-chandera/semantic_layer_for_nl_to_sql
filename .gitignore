@@ -17,4 +17,6 @@ logs/
 # Runtime chart exports
 charts/
 
+# Runtime cache store
+data/nl_to_sql_cache.db
 
