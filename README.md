@@ -1,6 +1,18 @@
 
 ## Architecture
 
+The app follows a simple NL-to-SQL pipeline:
+
+1. The Streamlit UI in `streamlit_app.py` accepts a natural language question.
+2. `src/pipeline.py` loads `data/semantic_layer.json` and asks Gemini to route the question to relevant semantic-layer tables and metrics.
+3. The same pipeline builds a focused SQL-generation prompt from the selected tables, metrics, join paths, ambiguity rules, and query hints.
+4. Gemini returns a structured SQL response containing the generated SQL, explanation, assumptions, follow-up questions, and chart recommendation.
+5. Before any SQL is executed, `src/02_run_sql_on_sqlite.py` runs regex-based SQL guardrails. The guardrail removes comments and quoted strings, then blocks generated SQL containing `INSERT`, `UPDATE`, or `DELETE`.
+6. If the guardrail passes, the SQL runner validates referenced tables against the SQLite database, checks the query plan with `EXPLAIN QUERY PLAN`, and then executes the query on `data/assignment.db`.
+7. The Streamlit UI displays the generated SQL and the query result.
+
+This keeps write-operation protection at the SQL execution boundary, so any caller using `run_query()` gets the same guardrail before database access.
+
 ## Example video
 sample input/output demonstrating the solution.
 

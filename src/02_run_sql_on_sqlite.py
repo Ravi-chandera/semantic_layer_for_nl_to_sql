@@ -11,6 +11,27 @@ DB_PATH = ROOT_DIR / "data" / "assignment.db"
 configure_logging()
 logger = logging.getLogger(__name__)
 
+BLOCKED_SQL_OPERATIONS = ("INSERT", "UPDATE", "DELETE")
+
+
+def remove_sql_literals_and_comments(query):
+    without_comments = re.sub(r"--.*?$|/\*.*?\*/", " ", query, flags=re.MULTILINE | re.DOTALL)
+    return re.sub(r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"", " ", without_comments)
+
+
+def validate_sql_guardrails(query):
+    searchable_query = remove_sql_literals_and_comments(query)
+    blocked_pattern = rf"\b({'|'.join(BLOCKED_SQL_OPERATIONS)})\b"
+    blocked_matches = sorted(set(re.findall(blocked_pattern, searchable_query, flags=re.IGNORECASE)))
+
+    if blocked_matches:
+        blocked_operations = [operation.upper() for operation in blocked_matches]
+        logger.error("SQL guardrail blocked operation(s): %s", blocked_operations)
+        return f"SQL Guardrail Error: write operations are not allowed: {blocked_operations}"
+
+    logger.info("SQL guardrail passed")
+    return None
+
 
 def get_db_tables(cursor):
     cursor.execute(
@@ -54,6 +75,11 @@ def run_query(query, db_name=DB_PATH):
 
     try:
         cursor = conn.cursor()
+        guardrail_error = validate_sql_guardrails(query)
+
+        if guardrail_error:
+            return guardrail_error
+
         validation_error = validate_query_tables(query, cursor)
 
         if validation_error:

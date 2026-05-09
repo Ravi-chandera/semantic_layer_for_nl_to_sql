@@ -1,0 +1,200 @@
+from dotenv import load_dotenv
+from google import genai
+import json
+import logging
+from pathlib import Path
+
+import plotly.express as px
+
+from logging_config import configure_logging
+from prompt import CHART_AGENT_PROMPT
+
+load_dotenv()
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+CHARTS_DIR = ROOT_DIR / "charts"
+
+configure_logging()
+logger = logging.getLogger(__name__)
+
+client = genai.Client()
+
+SUPPORTED_CHART_FUNCTIONS = {
+    "bar_chart",
+    "line_chart",
+    "pie_chart",
+    "scatter_chart",
+    "none",
+}
+
+CHART_FUNCTION_ALIASES = {
+    "bar": "bar_chart",
+    "line": "line_chart",
+    "pie": "pie_chart",
+    "scatter": "scatter_chart",
+}
+
+
+def gemini_call(model_name, contents):
+    response = client.models.generate_content(
+        model=model_name, contents=contents
+    )
+    return response.text
+
+
+def load_string_as_json(input_string):
+    cleaned_string = input_string.strip()
+
+    if cleaned_string.startswith("```json"):
+        cleaned_string = cleaned_string.removeprefix("```json").strip()
+    if cleaned_string.startswith("```"):
+        cleaned_string = cleaned_string.removeprefix("```").strip()
+    if cleaned_string.endswith("```"):
+        cleaned_string = cleaned_string.removesuffix("```").strip()
+
+    return json.loads(cleaned_string)
+
+
+def create_chart_prompt(user_question, chart_hint, sql_result):
+    preview_rows = sql_result[:50]
+
+    return (
+        CHART_AGENT_PROMPT
+        .replace("{{user_question}}", user_question)
+        .replace("{{chart_hint}}", chart_hint or "none")
+        .replace("{{sql_result}}", json.dumps(preview_rows, indent=2, default=str))
+    )
+
+
+def is_chart_requested(chart_hint):
+    return chart_hint and str(chart_hint).strip().lower() != "none"
+
+
+def is_chartable_result(sql_result):
+    return isinstance(sql_result, list) and len(sql_result) > 0 and isinstance(sql_result[0], dict)
+
+
+def column_exists(sql_result, column_name):
+    return column_name in sql_result[0]
+
+
+def validate_chart_plan(chart_plan, sql_result):
+    function_name = CHART_FUNCTION_ALIASES.get(
+        chart_plan.get("function_name"),
+        chart_plan.get("function_name"),
+    )
+    chart_plan["function_name"] = function_name
+    arguments = chart_plan.get("arguments", {})
+
+    if function_name not in SUPPORTED_CHART_FUNCTIONS:
+        raise ValueError(f"Unsupported chart function: {function_name}")
+
+    if function_name == "none":
+        return {"function_name": "none", "arguments": {}, "reason": chart_plan.get("reason")}
+
+    if not isinstance(arguments, dict):
+        raise ValueError("Chart arguments must be a JSON object.")
+
+    column_arguments = {
+        "bar_chart": ["x", "y"],
+        "line_chart": ["x", "y"],
+        "pie_chart": ["names", "values"],
+        "scatter_chart": ["x", "y"],
+    }
+
+    required_arguments = column_arguments[function_name] + ["title"]
+    missing_arguments = [
+        argument_name
+        for argument_name in required_arguments
+        if not arguments.get(argument_name)
+    ]
+
+    if missing_arguments:
+        raise ValueError(f"Chart plan is missing required argument(s): {missing_arguments}")
+
+    missing_columns = [
+        arguments.get(argument_name)
+        for argument_name in column_arguments[function_name]
+        if not column_exists(sql_result, arguments.get(argument_name))
+    ]
+
+    if missing_columns:
+        raise ValueError(f"Chart plan references missing column(s): {missing_columns}")
+
+    color_column = arguments.get("color")
+    if color_column and not column_exists(sql_result, color_column):
+        raise ValueError(f"Chart plan references missing color column: {color_column}")
+
+    return chart_plan
+
+
+def bar_chart(data, x, y, title, color=None, x_title=None, y_title=None):
+    fig = px.bar(data, x=x, y=y, color=color, title=title)
+    fig.update_layout(xaxis_title=x_title or x, yaxis_title=y_title or y)
+    return style_chart(fig)
+
+
+def line_chart(data, x, y, title, color=None, x_title=None, y_title=None):
+    fig = px.line(data, x=x, y=y, color=color, markers=True, title=title)
+    fig.update_layout(xaxis_title=x_title or x, yaxis_title=y_title or y)
+    return style_chart(fig)
+
+
+def pie_chart(data, names, values, title):
+    fig = px.pie(data, names=names, values=values, title=title, hole=0.35)
+    return style_chart(fig)
+
+
+def scatter_chart(data, x, y, title, color=None, x_title=None, y_title=None):
+    fig = px.scatter(data, x=x, y=y, color=color, title=title)
+    fig.update_layout(xaxis_title=x_title or x, yaxis_title=y_title or y)
+    return style_chart(fig)
+
+
+def style_chart(fig):
+    fig.update_layout(
+        template="plotly_white",
+        title_x=0.02,
+        margin={"l": 20, "r": 20, "t": 70, "b": 30},
+        legend_title_text="",
+        height=440,
+    )
+    return fig
+
+
+def build_chart_from_plan(sql_result, chart_plan):
+    function_name = chart_plan["function_name"]
+
+    if function_name == "none":
+        return None
+
+    chart_functions = {
+        "bar_chart": bar_chart,
+        "line_chart": line_chart,
+        "pie_chart": pie_chart,
+        "scatter_chart": scatter_chart,
+    }
+
+    return chart_functions[function_name](sql_result, **chart_plan["arguments"])
+
+
+def save_chart_html(fig):
+    CHARTS_DIR.mkdir(exist_ok=True)
+    chart_path = CHARTS_DIR / "latest_chart.html"
+    fig.write_html(chart_path, include_plotlyjs="cdn")
+    return chart_path
+
+
+def generate_chart_for_result(user_question, chart_hint, sql_result, model_name="gemini-3-flash-preview"):
+    if not is_chart_requested(chart_hint) or not is_chartable_result(sql_result):
+        return None, None, None
+
+    chart_prompt = create_chart_prompt(user_question, chart_hint, sql_result)
+    chart_response_text = gemini_call(model_name, chart_prompt)
+    chart_plan = validate_chart_plan(load_string_as_json(chart_response_text), sql_result)
+    logger.info("Chart agent plan: %s", chart_plan)
+
+    fig = build_chart_from_plan(sql_result, chart_plan)
+    chart_path = save_chart_html(fig) if fig else None
+
+    return fig, chart_plan, chart_path
