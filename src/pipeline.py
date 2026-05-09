@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from google import genai
 import json
 import logging
+from functools import lru_cache
 from typing import Any, Literal, TypedDict
 
 from langgraph.checkpoint.memory import InMemorySaver
@@ -73,6 +74,9 @@ class NLToSQLState(TypedDict, total=False):
     resolved_question: str
     model_name: str
     semantic_layer: dict[str, Any]
+    semantic_layer_hash: str
+    router_tables_json: str
+    router_metrics_json: str
     conversation_turns: list[dict[str, Any]]
     conversation_context: str
     question_resolution_prompt: str
@@ -99,13 +103,23 @@ class NLToSQLState(TypedDict, total=False):
     cache_store: dict[str, Any]
 
 
+@lru_cache(maxsize=1)
+def load_environment():
+    load_dotenv(ROOT_DIR / ".env", override=True)
+
+
+@lru_cache(maxsize=4)
+def get_gemini_client(api_key):
+    return genai.Client(api_key=api_key)
+
+
 def gemini_call(model_name, contents, trace_name="gemini-generate-content"):
-    load_dotenv(override=True)
+    load_environment()
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY is not set. Update your .env file or environment variables.")
 
-    client = genai.Client(api_key=api_key)
+    client = get_gemini_client(api_key)
     model_parameters = {
         "temperature": 0,
         "top_p": 0.1,
@@ -132,6 +146,18 @@ def load_json(file_path):
         return json.load(f)
 
 
+@lru_cache(maxsize=4)
+def load_semantic_layer_bundle(file_path, mtime_ns):
+    semantic_layer = load_json(file_path)
+    layer_hash = semantic_layer_hash(semantic_layer)
+    return {
+        "semantic_layer": semantic_layer,
+        "semantic_layer_hash": layer_hash,
+        "router_tables_json": json.dumps(build_router_tables(semantic_layer), indent=2),
+        "router_metrics_json": json.dumps(build_router_metrics(semantic_layer), indent=2),
+    }
+
+
 def load_string_as_json(input_string):
     cleaned_string = input_string.strip()
 
@@ -150,15 +176,20 @@ def load_semantic_layer_node(state: NLToSQLState):
         "load-semantic-layer",
         input={"path": str(SEMANTIC_LAYER_PATH)},
     ) as span:
-        semantic_layer = load_json(SEMANTIC_LAYER_PATH)
+        semantic_layer_bundle = load_semantic_layer_bundle(
+            str(SEMANTIC_LAYER_PATH),
+            SEMANTIC_LAYER_PATH.stat().st_mtime_ns,
+        )
+        semantic_layer = semantic_layer_bundle["semantic_layer"]
         safe_update_observation(
             span,
             output={
                 "table_count": len(semantic_layer.get("tables", {})),
                 "metric_count": len(semantic_layer.get("metrics", {})),
+                "semantic_layer_hash": semantic_layer_bundle["semantic_layer_hash"],
             },
         )
-        return {"semantic_layer": semantic_layer}
+        return semantic_layer_bundle
 
 
 def prepare_memory_context_node(state: NLToSQLState):
@@ -293,7 +324,7 @@ def lookup_cache_node(state: NLToSQLState):
             safe_update_observation(span, output=node_output)
             return node_output
 
-        layer_hash = semantic_layer_hash(state["semantic_layer"])
+        layer_hash = state.get("semantic_layer_hash") or semantic_layer_hash(state["semantic_layer"])
         resolved_question = state.get("resolved_question") or state["user_question"]
         hit = lookup_cache(resolved_question, layer_hash)
 
@@ -389,6 +420,8 @@ def route_question_node(state: NLToSQLState):
             user_question=user_question,
             conversation_context=active_conversation_context(state),
             original_user_question=state["user_question"],
+            router_tables_json=state.get("router_tables_json"),
+            router_metrics_json=state.get("router_metrics_json"),
         )
         router_response_text = gemini_call(
             model_name,
@@ -636,7 +669,7 @@ def store_cache_node(state: NLToSQLState):
         cache_store_result = store_cache_entry(
             question=state.get("resolved_question") or state["user_question"],
             original_question=state["user_question"],
-            layer_hash=semantic_layer_hash(state["semantic_layer"]),
+            layer_hash=state.get("semantic_layer_hash") or semantic_layer_hash(state["semantic_layer"]),
             model_name=state["model_name"],
             sql_response=sql_response,
             selected_tables=state.get("selected_tables", []),
@@ -795,7 +828,7 @@ def record_sql_execution_for_thread(thread_id, sql_result):
         if semantic_layer:
             delete_result = delete_cache_entry(
                 latest_turn.get("resolved_question") or latest_turn.get("user_question"),
-                semantic_layer_hash(semantic_layer),
+                values.get("semantic_layer_hash") or semantic_layer_hash(semantic_layer),
             )
             logger.info("Removed failed SQL from cache: %s", delete_result)
 

@@ -18,11 +18,21 @@ def create_question_resolution_prompt(conversation_context, user_question):
     )
 
 
-def create_router_prompt(semantic_layer, user_question, conversation_context, original_user_question):
+def create_router_prompt(
+    semantic_layer,
+    user_question,
+    conversation_context,
+    original_user_question,
+    router_tables_json=None,
+    router_metrics_json=None,
+):
+    tables_json = router_tables_json or json.dumps(build_router_tables(semantic_layer), indent=2)
+    metrics_json = router_metrics_json or json.dumps(build_router_metrics(semantic_layer), indent=2)
+
     return (
         ROUTER_PROMPT
-        .replace("{{list_of_tables_from_semantic_layer}}", json.dumps(build_router_tables(semantic_layer), indent=2))
-        .replace("{{list_of_metrics_from_semantic_layer}}", json.dumps(build_router_metrics(semantic_layer), indent=2))
+        .replace("{{list_of_tables_from_semantic_layer}}", tables_json)
+        .replace("{{list_of_metrics_from_semantic_layer}}", metrics_json)
         .replace("{{conversation_context}}", conversation_context)
         .replace("{{original_user_question}}", original_user_question)
         .replace("{{user_question}}", user_question)

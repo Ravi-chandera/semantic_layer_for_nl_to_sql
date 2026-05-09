@@ -3,6 +3,7 @@ import logging
 
 
 logger = logging.getLogger(__name__)
+_SQL_CONTEXT_CACHE = {}
 
 
 def build_router_tables(semantic_layer):
@@ -78,6 +79,14 @@ def filter_join_paths_for_tables(selected_tables, semantic_layer):
 
 
 def build_sql_context(selected_tables, selected_metrics, semantic_layer):
+    cache_key = (
+        id(semantic_layer),
+        tuple(selected_tables),
+        tuple(selected_metrics),
+    )
+    if cache_key in _SQL_CONTEXT_CACHE:
+        return _SQL_CONTEXT_CACHE[cache_key]
+
     context = []
 
     table_context = {}
@@ -104,7 +113,9 @@ def build_sql_context(selected_tables, selected_metrics, semantic_layer):
         if key in semantic_layer:
             context.append(f"{key}: {json.dumps(semantic_layer[key], indent=2)}")
 
-    return "\n\n".join(context)
+    sql_context = "\n\n".join(context)
+    _SQL_CONTEXT_CACHE[cache_key] = sql_context
+    return sql_context
 
 
 def pick_display_column(table_info):

@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -7,6 +8,8 @@ from typing import Any
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 CHAT_DB_PATH = ROOT_DIR / "data" / "chat_history.db"
+_CHAT_INIT_LOCK = threading.Lock()
+_CHAT_INITIALIZED = False
 
 
 def utc_now():
@@ -21,36 +24,47 @@ def get_connection():
 
 
 def init_chat_store():
-    with get_connection() as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS chats (
-                id TEXT PRIMARY KEY,
-                thread_id TEXT NOT NULL UNIQUE,
-                name TEXT NOT NULL,
-                langfuse_trace_id TEXT,
-                memory_json TEXT NOT NULL DEFAULT '[]',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                chat_id TEXT NOT NULL,
-                role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
-                content_json TEXT NOT NULL,
-                turn_index INTEGER NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
-            );
-            """
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id, id);"
-        )
+    global _CHAT_INITIALIZED
+
+    if _CHAT_INITIALIZED and CHAT_DB_PATH.exists():
+        return
+
+    with _CHAT_INIT_LOCK:
+        if _CHAT_INITIALIZED and CHAT_DB_PATH.exists():
+            return
+
+        with get_connection() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chats (
+                    id TEXT PRIMARY KEY,
+                    thread_id TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    langfuse_trace_id TEXT,
+                    memory_json TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id TEXT NOT NULL,
+                    role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+                    content_json TEXT NOT NULL,
+                    turn_index INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
+                );
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id, id);"
+            )
+
+        _CHAT_INITIALIZED = True
 
 
 def create_chat(thread_id, name, langfuse_trace_id=None):

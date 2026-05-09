@@ -2,6 +2,7 @@ import importlib.util
 import json
 import sys
 import uuid
+from functools import lru_cache
 from pathlib import Path
 
 import plotly.io as pio
@@ -41,6 +42,7 @@ from pipeline import (
 )
 
 
+@lru_cache(maxsize=1)
 def load_sql_runner():
     spec = importlib.util.spec_from_file_location("sql_runner", SQL_RUNNER_PATH)
     sql_runner = importlib.util.module_from_spec(spec)

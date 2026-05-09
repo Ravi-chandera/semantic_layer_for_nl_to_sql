@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from google import genai
 import json
 import logging
+from functools import lru_cache
 from pathlib import Path
 
 import plotly.express as px
@@ -34,13 +35,23 @@ CHART_FUNCTION_ALIASES = {
 }
 
 
+@lru_cache(maxsize=1)
+def load_environment():
+    load_dotenv(ROOT_DIR / ".env", override=True)
+
+
+@lru_cache(maxsize=4)
+def get_gemini_client(api_key):
+    return genai.Client(api_key=api_key)
+
+
 def gemini_call(model_name, contents, trace_name="gemini-chart-planner"):
-    load_dotenv(override=True)
+    load_environment()
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY is not set. Update your .env file or environment variables.")
 
-    client = genai.Client(api_key=api_key)
+    client = get_gemini_client(api_key)
     with traced_generation(
         trace_name,
         model_name,

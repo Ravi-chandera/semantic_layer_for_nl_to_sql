@@ -5,6 +5,8 @@ import math
 import os
 import re
 import sqlite3
+import threading
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -18,6 +20,10 @@ EMBEDDING_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 SEMANTIC_MATCH_THRESHOLD = 0.98
 
 logger = logging.getLogger(__name__)
+_CACHE_INIT_LOCK = threading.Lock()
+_CACHE_INITIALIZED = False
+_EMBEDDING_BACKFILL_LOCK = threading.Lock()
+_EMBEDDING_BACKFILLS_IN_FLIGHT = set()
 
 STOPWORDS = {
     "a",
@@ -143,41 +149,59 @@ def cache_connection():
 
 
 def init_cache_store():
-    with cache_connection() as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS cache_entries (
-                id TEXT PRIMARY KEY,
-                semantic_layer_hash TEXT NOT NULL,
-                normalized_question TEXT NOT NULL,
-                keyword_signature TEXT NOT NULL,
-                question_text TEXT NOT NULL,
-                representative_original_question TEXT,
-                model_name TEXT NOT NULL,
-                sql_response_json TEXT NOT NULL,
-                selected_tables_json TEXT NOT NULL,
-                selected_metrics_json TEXT NOT NULL,
-                embedding_model TEXT NOT NULL,
-                embedding_json TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                last_hit_at TEXT,
-                hit_count INTEGER NOT NULL DEFAULT 0
-            );
-            """
-        )
-        conn.execute(
-            """
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_cache_semantic_question
-            ON cache_entries (semantic_layer_hash, normalized_question);
-            """
-        )
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_cache_keyword_signature
-            ON cache_entries (semantic_layer_hash, keyword_signature);
-            """
-        )
+    global _CACHE_INITIALIZED
+
+    if _CACHE_INITIALIZED and CACHE_DB_PATH.exists():
+        return
+
+    with _CACHE_INIT_LOCK:
+        if _CACHE_INITIALIZED and CACHE_DB_PATH.exists():
+            return
+
+        with cache_connection() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS cache_entries (
+                    id TEXT PRIMARY KEY,
+                    semantic_layer_hash TEXT NOT NULL,
+                    normalized_question TEXT NOT NULL,
+                    keyword_signature TEXT NOT NULL,
+                    question_text TEXT NOT NULL,
+                    representative_original_question TEXT,
+                    model_name TEXT NOT NULL,
+                    sql_response_json TEXT NOT NULL,
+                    selected_tables_json TEXT NOT NULL,
+                    selected_metrics_json TEXT NOT NULL,
+                    embedding_model TEXT NOT NULL,
+                    embedding_json TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    last_hit_at TEXT,
+                    hit_count INTEGER NOT NULL DEFAULT 0
+                );
+                """
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_cache_semantic_question
+                ON cache_entries (semantic_layer_hash, normalized_question);
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_cache_keyword_signature
+                ON cache_entries (semantic_layer_hash, keyword_signature);
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_cache_semantic_embedding
+                ON cache_entries (semantic_layer_hash, embedding_model)
+                WHERE embedding_json IS NOT NULL;
+                """
+            )
+
+        _CACHE_INITIALIZED = True
 
 
 def stable_json_dumps(value: Any):
@@ -293,14 +317,14 @@ def _record_cache_hit(cache_id: str):
         )
 
 
-def _backfill_cache_embedding(cache_id: str, question: str):
+def _backfill_cache_embedding_by_question(layer_hash: str, normalized_question: str, question: str):
     try:
         embedding = embed_question(question)
         embedding_json = json.dumps(embedding)
     except Exception as e:
         logger.warning(
-            "Semantic cache embedding backfill failed for cache entry %s: %s",
-            cache_id,
+            "Semantic cache embedding backfill failed for normalized question %s: %s",
+            normalized_question,
             e,
             exc_info=True,
         )
@@ -308,17 +332,69 @@ def _backfill_cache_embedding(cache_id: str, question: str):
 
     timestamp = utc_now()
     with cache_connection() as conn:
-        conn.execute(
+        cursor = conn.execute(
             """
             UPDATE cache_entries
             SET embedding_model = ?,
                 embedding_json = ?,
                 updated_at = ?
-            WHERE id = ?;
+            WHERE semantic_layer_hash = ?
+              AND normalized_question = ?;
             """,
-            (EMBEDDING_MODEL_NAME, embedding_json, timestamp, cache_id),
+            (
+                EMBEDDING_MODEL_NAME,
+                embedding_json,
+                timestamp,
+                layer_hash,
+                normalized_question,
+            ),
         )
 
+    return cursor.rowcount > 0
+
+
+def _semantic_embedding_delay_seconds():
+    try:
+        return max(float(os.getenv("NL_TO_SQL_CACHE_EMBEDDING_DELAY_SECONDS", "1")), 0.0)
+    except ValueError:
+        return 1.0
+
+
+def _semantic_embedding_backfill_enabled():
+    return os.getenv("NL_TO_SQL_CACHE_EMBEDDINGS", "async").strip().lower() not in {
+        "0",
+        "false",
+        "off",
+        "disabled",
+    }
+
+
+def _start_embedding_backfill_thread(layer_hash: str, normalized_question: str, question: str):
+    if not _semantic_embedding_backfill_enabled():
+        return False
+
+    backfill_key = (layer_hash, normalized_question)
+    with _EMBEDDING_BACKFILL_LOCK:
+        if backfill_key in _EMBEDDING_BACKFILLS_IN_FLIGHT:
+            return False
+        _EMBEDDING_BACKFILLS_IN_FLIGHT.add(backfill_key)
+
+    def backfill():
+        try:
+            delay_seconds = _semantic_embedding_delay_seconds()
+            if delay_seconds:
+                time.sleep(delay_seconds)
+            _backfill_cache_embedding_by_question(layer_hash, normalized_question, question)
+        finally:
+            with _EMBEDDING_BACKFILL_LOCK:
+                _EMBEDDING_BACKFILLS_IN_FLIGHT.discard(backfill_key)
+
+    thread = threading.Thread(
+        target=backfill,
+        name="nl-to-sql-cache-embedding-backfill",
+        daemon=True,
+    )
+    thread.start()
     return True
 
 
@@ -376,7 +452,11 @@ def lookup_cache(question: str, layer_hash: str):
     if keyword_hit:
         _record_cache_hit(keyword_hit["id"])
         if row["embedding_json"] is None:
-            _backfill_cache_embedding(row["id"], row["question_text"])
+            _start_embedding_backfill_thread(
+                layer_hash,
+                row["normalized_question"],
+                row["question_text"],
+            )
         return keyword_hit
 
     if not candidate_rows:
@@ -433,17 +513,7 @@ def store_cache_entry(
 
     signature = keyword_signature(question)
     timestamp = utc_now()
-
-    try:
-        embedding = embed_question(question)
-        embedding_json = json.dumps(embedding)
-    except Exception as e:
-        logger.warning(
-            "Semantic cache embedding failed; storing keyword-only cache entry: %s",
-            e,
-            exc_info=True,
-        )
-        embedding_json = None
+    embedding_json = None
 
     cache_id = str(uuid.uuid4())
     with cache_connection() as conn:
@@ -496,9 +566,16 @@ def store_cache_entry(
             ),
         )
 
+    embedding_backfill_started = _start_embedding_backfill_thread(
+        layer_hash,
+        normalized_question,
+        question,
+    )
+
     return {
         "stored": True,
-        "semantic_enabled": embedding_json is not None,
+        "semantic_enabled": False,
+        "semantic_backfill_started": embedding_backfill_started,
         "keyword_signature": signature,
     }
 
