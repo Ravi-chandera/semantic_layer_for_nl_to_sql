@@ -3,20 +3,26 @@ from dotenv import load_dotenv
 import os
 from prompt import SEMANTIC_LAYER_PROMPT
 
-load_dotenv()
-
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-client = genai.Client()
-
 
 def gemini_call(model_name, contents):
+    load_dotenv(override=True)
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY is not set. Update your .env file or environment variables.")
 
+    client = genai.Client(api_key=api_key)
     response = client.models.generate_content(
         model=model_name, contents=contents
     )
     return response.text
 
 def create_semantic_layer(model_name, contents):
+    load_dotenv(override=True)
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY is not set. Update your .env file or environment variables.")
+
+    client = genai.Client(api_key=api_key)
     response = client.models.generate_content(
         model=model_name, contents=contents
     )

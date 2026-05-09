@@ -1,3 +1,5 @@
+import os
+
 from dotenv import load_dotenv
 from google import genai
 import json
@@ -9,15 +11,11 @@ import plotly.express as px
 from logging_config import configure_logging
 from prompt import CHART_AGENT_PROMPT
 
-load_dotenv()
-
 ROOT_DIR = Path(__file__).resolve().parents[1]
 CHARTS_DIR = ROOT_DIR / "charts"
 
 configure_logging()
 logger = logging.getLogger(__name__)
-
-client = genai.Client()
 
 SUPPORTED_CHART_FUNCTIONS = {
     "bar_chart",
@@ -36,6 +34,12 @@ CHART_FUNCTION_ALIASES = {
 
 
 def gemini_call(model_name, contents):
+    load_dotenv(override=True)
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY is not set. Update your .env file or environment variables.")
+
+    client = genai.Client(api_key=api_key)
     response = client.models.generate_content(
         model=model_name, contents=contents
     )

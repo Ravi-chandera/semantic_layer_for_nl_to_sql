@@ -13,6 +13,16 @@ logger = logging.getLogger(__name__)
 
 BLOCKED_SQL_OPERATIONS = ("INSERT", "UPDATE", "DELETE")
 
+DISPLAY_LABEL_LOOKUPS = {
+    "vendor_id": ("vendors", "id", "name", "vendor_name"),
+    "company_id": ("companies", "id", "name", "company_name"),
+    "department_id": ("departments", "id", "name", "department_name"),
+    "product_id": ("products", "id", "name", "product_name"),
+    "invoice_id": ("invoices", "id", "invoice_number", "invoice_number"),
+    "po_id": ("purchase_orders", "id", "po_number", "po_number"),
+    "grn_id": ("grns", "id", "grn_number", "grn_number"),
+}
+
 
 def remove_sql_literals_and_comments(query):
     without_comments = re.sub(r"--.*?$|/\*.*?\*/", " ", query, flags=re.MULTILINE | re.DOTALL)
@@ -69,6 +79,39 @@ def validate_query_plan(query, cursor):
     cursor.execute(f"EXPLAIN QUERY PLAN {query}")
 
 
+def enrich_results_with_display_labels(results, cursor):
+    if not results:
+        return results
+
+    for id_alias, (table_name, id_column, label_column, output_alias) in DISPLAY_LABEL_LOOKUPS.items():
+        if id_alias not in results[0] or output_alias in results[0]:
+            continue
+
+        ids = sorted({
+            row[id_alias]
+            for row in results
+            if row.get(id_alias) is not None
+        })
+
+        if not ids:
+            continue
+
+        placeholders = ",".join("?" for _ in ids)
+        cursor.execute(
+            f"SELECT {id_column}, {label_column} FROM {table_name} WHERE {id_column} IN ({placeholders})",
+            ids,
+        )
+        labels_by_id = {
+            row[id_column]: row[label_column]
+            for row in cursor.fetchall()
+        }
+
+        for row in results:
+            row[output_alias] = labels_by_id.get(row.get(id_alias))
+
+    return results
+
+
 def run_query(query, db_name=DB_PATH):
     conn = sqlite3.connect(db_name)
     conn.row_factory = sqlite3.Row
@@ -91,6 +134,7 @@ def run_query(query, db_name=DB_PATH):
         rows = cursor.fetchall()
 
         results = [dict(row) for row in rows]
+        results = enrich_results_with_display_labels(results, cursor)
         logger.info("Returned %s rows", len(results))
         return results
 
