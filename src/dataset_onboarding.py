@@ -4,7 +4,6 @@ import shutil
 import sqlite3
 from pathlib import Path
 
-
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT_DIR / "data"
 DEFAULT_DB_PATH = DATA_DIR / "assignment.db"
@@ -149,11 +148,11 @@ def generate_dataset_understanding(discovered, model_name=None, llm_call=None):
     """
     if llm_call is None:
         try:
+            from .gemini_client import gemini_call
             from .model_config import get_default_model_name
-            from .pipeline import gemini_call
         except ImportError:
+            from gemini_client import gemini_call
             from model_config import get_default_model_name
-            from pipeline import gemini_call
 
         llm_call = gemini_call
         model_name = model_name or get_default_model_name()
@@ -163,7 +162,9 @@ def generate_dataset_understanding(discovered, model_name=None, llm_call=None):
         + "\n\nDataset profile:\n"
         + json.dumps(_compact_profile_for_llm(discovered), indent=2, default=str)
     )
-    response_text = llm_call(model_name, prompt, trace_name="gemini-dataset-understanding")
+    response_text = llm_call(
+        model_name, prompt, trace_name="gemini-dataset-understanding"
+    )
     understanding = _load_llm_json(response_text)
     return understanding if isinstance(understanding, dict) else {}
 
@@ -181,7 +182,9 @@ def apply_dataset_understanding_to_review(review, understanding):
         table_update = table_updates.get(table.get("table_name"))
         if not table_update:
             continue
-        table["business_name"] = table_update.get("business_name") or table.get("business_name")
+        table["business_name"] = table_update.get("business_name") or table.get(
+            "business_name"
+        )
         if table_update.get("synonyms") is not None:
             table["synonyms"] = split_synonyms(table_update.get("synonyms"))
 
@@ -191,10 +194,14 @@ def apply_dataset_understanding_to_review(review, understanding):
         if isinstance(item, dict) and item.get("table_name") and item.get("column_name")
     }
     for column in updated.get("columns", []):
-        column_update = column_updates.get((column.get("table_name"), column.get("column_name")))
+        column_update = column_updates.get(
+            (column.get("table_name"), column.get("column_name"))
+        )
         if not column_update:
             continue
-        column["business_name"] = column_update.get("business_name") or column.get("business_name")
+        column["business_name"] = column_update.get("business_name") or column.get(
+            "business_name"
+        )
         if column_update.get("synonyms") is not None:
             column["synonyms"] = split_synonyms(column_update.get("synonyms"))
         if column_update.get("is_metric") is not None:
@@ -231,7 +238,9 @@ def is_sensitive_column(column_name):
 
 def is_metric_column(column_name, sqlite_type):
     normalized = str(column_name or "").lower()
-    return is_numeric_type(sqlite_type) and any(part in normalized for part in METRIC_NAME_PARTS)
+    return is_numeric_type(sqlite_type) and any(
+        part in normalized for part in METRIC_NAME_PARTS
+    )
 
 
 def _connect_read_only(db_path):
@@ -374,7 +383,13 @@ def infer_join_candidates(discovered):
             target_table = table_aliases.get(alias)
             target_pk = primary_key_by_table.get(target_table)
             if target_table and target_pk:
-                add_candidate(table["table_name"], column_name, target_table, target_pk, "name_match")
+                add_candidate(
+                    table["table_name"],
+                    column_name,
+                    target_table,
+                    target_pk,
+                    "name_match",
+                )
 
     return candidates
 
@@ -393,7 +408,9 @@ def build_review_template(discovered):
                     "sql": f"SUM({table['table_name']}.{column['name']})",
                     "filters": None,
                     "synonyms": [],
-                    "result_unit": "count" if "count" in column["name"].lower() else "number",
+                    "result_unit": "count"
+                    if "count" in column["name"].lower()
+                    else "number",
                     "tables": [table["table_name"]],
                     "enabled": True,
                 }
@@ -403,7 +420,8 @@ def build_review_template(discovered):
         "tables": [
             {
                 "table_name": table["table_name"],
-                "business_name": table.get("business_name") or humanize_name(table["table_name"]),
+                "business_name": table.get("business_name")
+                or humanize_name(table["table_name"]),
                 "synonyms": [],
             }
             for table in discovered.get("tables", [])
@@ -412,7 +430,8 @@ def build_review_template(discovered):
             {
                 "table_name": table["table_name"],
                 "column_name": column["name"],
-                "business_name": column.get("business_name") or humanize_name(column["name"]),
+                "business_name": column.get("business_name")
+                or humanize_name(column["name"]),
                 "synonyms": column.get("synonyms") or [],
                 "is_metric": bool(column.get("is_metric")),
                 "is_sensitive": bool(column.get("is_sensitive")),
@@ -453,15 +472,22 @@ def build_semantic_layer(discovered, review=None):
         semantic_layer["dataset_context"] = {
             "domain": dataset_understanding.get("domain"),
             "summary": dataset_understanding.get("dataset_summary"),
-            "suggested_questions": dataset_understanding.get("suggested_questions") or [],
+            "suggested_questions": dataset_understanding.get("suggested_questions")
+            or [],
         }
         if dataset_understanding.get("ambiguity_rules"):
-            semantic_layer["ambiguity_rules"] = dataset_understanding.get("ambiguity_rules")
+            semantic_layer["ambiguity_rules"] = dataset_understanding.get(
+                "ambiguity_rules"
+            )
 
     for table in discovered.get("tables", []):
         table_name = table["table_name"]
         table_review = table_reviews.get(table_name, {})
-        business_name = table_review.get("business_name") or table.get("business_name") or humanize_name(table_name)
+        business_name = (
+            table_review.get("business_name")
+            or table.get("business_name")
+            or humanize_name(table_name)
+        )
         table_synonyms = split_synonyms(table_review.get("synonyms"))
         semantic_layer["synonyms"]["entity_synonyms"][table_name] = table_synonyms
         primary_key = ", ".join(table.get("primary_keys") or [])
@@ -477,14 +503,24 @@ def build_semantic_layer(discovered, review=None):
 
         for column in table.get("columns", []):
             column_review = column_reviews.get((table_name, column["name"]), {})
-            column_business_name = column_review.get("business_name") or column.get("business_name") or humanize_name(column["name"])
+            column_business_name = (
+                column_review.get("business_name")
+                or column.get("business_name")
+                or humanize_name(column["name"])
+            )
             semantic_table["columns"][column["name"]] = {
                 "type": column.get("type") or "",
                 "description": f"{column_business_name} on {business_name}.",
-                "synonyms": split_synonyms(column_review.get("synonyms") or column.get("synonyms")),
+                "synonyms": split_synonyms(
+                    column_review.get("synonyms") or column.get("synonyms")
+                ),
                 "is_filterable": True,
-                "is_metric": bool(column_review.get("is_metric", column.get("is_metric"))),
-                "is_sensitive": bool(column_review.get("is_sensitive", column.get("is_sensitive"))),
+                "is_metric": bool(
+                    column_review.get("is_metric", column.get("is_metric"))
+                ),
+                "is_sensitive": bool(
+                    column_review.get("is_sensitive", column.get("is_sensitive"))
+                ),
                 "sample_values": column.get("sample_values", []),
             }
 
@@ -525,18 +561,23 @@ def build_semantic_layer(discovered, review=None):
         if not metric.get("enabled", True) or not metric.get("metric_name"):
             continue
         semantic_layer["metrics"][metric["metric_name"]] = {
-            "description": metric.get("description") or f"Metric {metric['metric_name']}.",
+            "description": metric.get("description")
+            or f"Metric {metric['metric_name']}.",
             "sql": metric.get("sql") or "",
             "filters": metric.get("filters") or None,
             "synonyms": split_synonyms(metric.get("synonyms")),
             "result_unit": metric.get("result_unit") or "number",
-            "tables": split_synonyms(metric.get("tables")) if isinstance(metric.get("tables"), str) else metric.get("tables", []),
+            "tables": split_synonyms(metric.get("tables"))
+            if isinstance(metric.get("tables"), str)
+            else metric.get("tables", []),
         }
 
     return semantic_layer
 
 
-def save_onboarded_dataset(source_db_path, semantic_layer, discovered, target_db_path=ACTIVE_DB_PATH):
+def save_onboarded_dataset(
+    source_db_path, semantic_layer, discovered, target_db_path=ACTIVE_DB_PATH
+):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     source_db_path = Path(source_db_path)
     target_db_path = Path(target_db_path)
@@ -554,8 +595,12 @@ def save_onboarded_dataset(source_db_path, semantic_layer, discovered, target_db
             for table in discovered.get("tables", [])
         ]
     }
-    SCHEMA_PATH.write_text(json.dumps(schema_payload, indent=2, default=str), encoding="utf-8")
-    SEMANTIC_LAYER_PATH.write_text(json.dumps(semantic_layer, indent=2, default=str), encoding="utf-8")
+    SCHEMA_PATH.write_text(
+        json.dumps(schema_payload, indent=2, default=str), encoding="utf-8"
+    )
+    SEMANTIC_LAYER_PATH.write_text(
+        json.dumps(semantic_layer, indent=2, default=str), encoding="utf-8"
+    )
 
     manifest = {
         "active_db_path": str(target_db_path),

@@ -5,14 +5,12 @@ from difflib import SequenceMatcher
 from pathlib import Path
 
 try:
-    from .dataset_onboarding import get_active_db_path
     from .pipeline_semantic_context import (
         entity_alias_for_table,
         label_alias_for_entity,
         pick_display_column,
     )
 except ImportError:
-    from dataset_onboarding import get_active_db_path
     from pipeline_semantic_context import (
         entity_alias_for_table,
         label_alias_for_entity,
@@ -150,7 +148,17 @@ def _score_phrase_against_value(phrase, value):
     return 0.0, "none"
 
 
-def search_entities(question, semantic_layer, db_path=None, *, row_limit=ENTITY_ROW_LIMIT):
+def _get_active_db_path():
+    try:
+        from .dataset_onboarding import get_active_db_path
+    except ImportError:
+        from dataset_onboarding import get_active_db_path
+    return get_active_db_path()
+
+
+def search_entities(
+    question, semantic_layer, db_path=None, *, row_limit=ENTITY_ROW_LIMIT
+):
     phrases = entity_search_phrases(question)
     if not phrases:
         return {
@@ -161,7 +169,7 @@ def search_entities(question, semantic_layer, db_path=None, *, row_limit=ENTITY_
             "context": [],
         }
 
-    resolved_db_path = Path(db_path or get_active_db_path())
+    resolved_db_path = Path(db_path or _get_active_db_path())
     candidates = entity_candidate_columns(semantic_layer)
     matches_by_key = {}
 
@@ -195,9 +203,15 @@ def search_entities(question, semantic_layer, db_path=None, *, row_limit=ENTITY_
                         current_phrase_len = len(phrase)
                         if existing["score"] > score + 0.08:
                             continue
-                        if existing_phrase_len > current_phrase_len and score <= existing["score"] + 0.08:
+                        if (
+                            existing_phrase_len > current_phrase_len
+                            and score <= existing["score"] + 0.08
+                        ):
                             continue
-                        if existing["score"] >= score and existing_phrase_len >= current_phrase_len:
+                        if (
+                            existing["score"] >= score
+                            and existing_phrase_len >= current_phrase_len
+                        ):
                             continue
 
                     matches_by_key[key] = {
@@ -238,7 +252,9 @@ def search_entities(question, semantic_layer, db_path=None, *, row_limit=ENTITY_
     return {
         "matches": matches,
         "ambiguous": bool(ambiguity),
-        "clarifying_question": ambiguity.get("clarifying_question") if ambiguity else None,
+        "clarifying_question": ambiguity.get("clarifying_question")
+        if ambiguity
+        else None,
         "options": ambiguity.get("options") if ambiguity else [],
         "matched_phrase": ambiguity.get("matched_phrase") if ambiguity else None,
         "context": context,
@@ -277,7 +293,11 @@ def find_entity_ambiguity(matches):
             "score": top_score,
             "matches": close_matches[:5],
         }
-        if not best or candidate["score"] > best["score"] or len(phrase) > len(best["matched_phrase"]):
+        if (
+            not best
+            or candidate["score"] > best["score"]
+            or len(phrase) > len(best["matched_phrase"])
+        ):
             best = candidate
 
     if not best:
