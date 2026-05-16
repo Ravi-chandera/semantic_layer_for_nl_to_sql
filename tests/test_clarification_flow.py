@@ -1,13 +1,7 @@
-import sys
 import unittest
-from pathlib import Path
 
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
-SRC_DIR = ROOT_DIR / "src"
-sys.path.append(str(SRC_DIR))
-
-from pipeline import (  # noqa: E402
+from src.pipeline import (
     MAX_CLARIFICATION_ATTEMPTS,
     clarification_attempts_for_current_question,
     is_executable_sql,
@@ -15,9 +9,9 @@ from pipeline import (  # noqa: E402
     lookup_cache_node,
     normalize_sql_response_after_generation,
 )
-from pipeline_config import SEMANTIC_LAYER_PATH  # noqa: E402
-from pipeline_semantic_context import find_required_clarification_rule  # noqa: E402
-from pipeline_semantic_context import expand_selected_tables_for_context  # noqa: E402
+from src.pipeline_config import SEMANTIC_LAYER_PATH
+from src.pipeline_semantic_context import find_required_clarification_rule
+from src.pipeline_semantic_context import expand_selected_tables_for_context
 
 
 class ClarificationFlowTests(unittest.TestCase):

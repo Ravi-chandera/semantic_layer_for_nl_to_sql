@@ -1,15 +1,9 @@
-import sys
 import unittest
-from pathlib import Path
 
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
-SRC_DIR = ROOT_DIR / "src"
-sys.path.append(str(SRC_DIR))
-
-import analysis_workflow  # noqa: E402
-from pipeline import load_json  # noqa: E402
-from pipeline_config import SEMANTIC_LAYER_PATH  # noqa: E402
+from src import analysis_workflow
+from src.pipeline import load_json
+from src.pipeline_config import SEMANTIC_LAYER_PATH
 
 
 class AnalysisWorkflowTests(unittest.TestCase):
@@ -72,6 +66,80 @@ class AnalysisWorkflowTests(unittest.TestCase):
 
         suggestion_text = " ".join(analysis["Suggested_Next_Queries"]).lower()
         self.assertNotIn("department", suggestion_text)
+
+    def test_what_can_i_ask_returns_data_overview_without_sql_generation(self):
+        original_generator = analysis_workflow.generate_sql_for_question
+
+        def fail_generate_sql_for_question(*args, **kwargs):
+            raise AssertionError("Overview requests should not call SQL generation.")
+
+        analysis_workflow.generate_sql_for_question = fail_generate_sql_for_question
+        try:
+            result = analysis_workflow.run_ai_native_analysis(
+                "What can I ask you?",
+                sql_runner=self.sql_runner,
+                use_llm_synthesis=False,
+            )
+        finally:
+            analysis_workflow.generate_sql_for_question = original_generator
+
+        analysis = result["analysis"]
+        self.assertEqual(analysis["Mode"], "data_overview")
+        self.assertFalse(analysis["Clarification"]["needed"])
+        self.assertIsNone(result["sql_output"]["SQL"])
+        self.assertIn("Dataset_Overview", analysis)
+
+        overview = analysis["Dataset_Overview"]
+        self.assertIn("invoices", overview["row_counts"])
+        self.assertIn("vendors", overview["row_counts"])
+        self.assertIn("revenue", overview["metrics"])
+        self.assertIn("total_spend", overview["metrics"])
+        self.assertIn("total_liability", overview["metrics"])
+        self.assertGreaterEqual(len(overview["example_questions"]), 5)
+
+        examples = " ".join(overview["example_questions"]).lower()
+        self.assertIn("vendor", examples)
+        self.assertNotIn("customer churn", examples)
+
+    def test_full_analysis_builds_and_runs_multi_question_plan(self):
+        original_generator = analysis_workflow.generate_sql_for_question
+
+        def fail_generate_sql_for_question(*args, **kwargs):
+            raise AssertionError("Broad analysis requests should use the deterministic planner.")
+
+        analysis_workflow.generate_sql_for_question = fail_generate_sql_for_question
+        try:
+            result = analysis_workflow.run_ai_native_analysis(
+                "Do a full analysis of accounts payable data",
+                sql_runner=self.sql_runner,
+                use_llm_synthesis=False,
+            )
+        finally:
+            analysis_workflow.generate_sql_for_question = original_generator
+
+        analysis = result["analysis"]
+        self.assertEqual(analysis["Mode"], "planned_dataset_analysis")
+        self.assertFalse(analysis["Clarification"]["needed"])
+        self.assertIsNone(result["sql_output"]["SQL"])
+        self.assertGreaterEqual(len(analysis["Analysis_Plan"]), 5)
+        self.assertGreaterEqual(len(analysis["Evidence"]), 5)
+        self.assertTrue(all(item["status"] == "ok" for item in analysis["Evidence"]))
+
+        plan_text = " ".join(item["question"] for item in analysis["Analysis_Plan"]).lower()
+        self.assertIn("invoice", plan_text)
+        self.assertIn("vendor", plan_text)
+        self.assertIn("purchase", plan_text)
+        self.assertIn("rejection", plan_text)
+        self.assertNotIn("customer churn", plan_text)
+
+        evidence_tables = {
+            table
+            for item in analysis["Evidence"]
+            for table in item.get("tables", [])
+        }
+        self.assertIn("invoices", evidence_tables)
+        self.assertIn("vendors", evidence_tables)
+        self.assertIn("purchase_orders", evidence_tables)
 
     def test_evidence_sql_safety_reports_non_read_and_missing_table_errors(self):
         unsafe_query = analysis_workflow.EvidenceQuery(

@@ -1,9 +1,6 @@
-import importlib.util
 import json
-import sys
 import time
 import uuid
-from functools import lru_cache
 from pathlib import Path
 
 import plotly.io as pio
@@ -12,13 +9,10 @@ import streamlit.components.v1 as components
 
 
 ROOT_DIR = Path(__file__).resolve().parent
-SRC_DIR = ROOT_DIR / "src"
-SQL_RUNNER_PATH = SRC_DIR / "02_run_sql_on_sqlite.py"
+APP_NAME = "AP Investigation Analyst"
 
-sys.path.append(str(SRC_DIR))
-
-from chart_agent import generate_chart_for_result
-from benchmark_store import (
+from src.chart_agent import generate_chart_for_result
+from src.benchmark_store import (
     BENCHMARK_QUESTIONS,
     append_benchmark_record,
     build_benchmark_record,
@@ -27,7 +21,7 @@ from benchmark_store import (
     utc_now as benchmark_utc_now,
     write_benchmark_dashboard,
 )
-from chat_store import (
+from src.chat_store import (
     append_message,
     get_chat,
     get_or_create_chat,
@@ -37,27 +31,19 @@ from chat_store import (
     load_chat_messages,
     update_chat_memory,
 )
-from langfuse_tracing import (
+from src.langfuse_tracing import (
     conversation_turn_trace,
     create_conversation_trace_id,
     flush_langfuse,
     safe_update_observation,
 )
-from pipeline import (
+from src.pipeline import (
     clear_conversation_memory,
     get_conversation_memory,
     restore_conversation_memory,
     summarize_sql_result,
 )
-from analysis_workflow import run_ai_native_analysis
-
-
-@lru_cache(maxsize=1)
-def load_sql_runner():
-    spec = importlib.util.spec_from_file_location("sql_runner", SQL_RUNNER_PATH)
-    sql_runner = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(sql_runner)
-    return sql_runner
+from src.analysis_workflow import run_ai_native_analysis
 
 
 def init_session_state():
@@ -470,21 +456,86 @@ def render_next_queries(analysis):
     )
 
 
+def build_investigation_report(analysis):
+    lines = [
+        f"# {APP_NAME} Report",
+        "",
+        f"Question: {analysis.get('Question')}",
+        f"Resolved question: {analysis.get('Resolved_Question')}",
+        "",
+        "## Business Answer",
+        analysis.get("Executive_Answer") or "No answer was returned.",
+        "",
+        "## Confidence",
+        json.dumps(analysis.get("Confidence") or {}, indent=2, default=str),
+        "",
+        "## Evidence",
+    ]
+
+    for item in analysis.get("Evidence") or []:
+        lines.extend(
+            [
+                f"- {item.get('name')} ({item.get('status')}): {item.get('purpose')}",
+                f"  Rows: {item.get('row_count')}",
+                "  SQL:",
+                "```sql",
+                item.get("sql") or "",
+                "```",
+            ]
+        )
+
+    lines.extend(["", "## Limitations"])
+    for limitation in analysis.get("Limitations") or []:
+        lines.append(f"- {limitation}")
+
+    return "\n".join(lines)
+
+
+def render_clickable_clarifications(question):
+    if not question:
+        return
+
+    lower_question = question.lower()
+    options = []
+    if "vendor" in lower_question and "product" in lower_question:
+        options = ["Break it down by vendor", "Break it down by product", "Use the default investigation plan"]
+    elif "top" in lower_question and "vendor" in lower_question:
+        options = ["Rank by invoice value", "Rank by invoice count", "Rank by payment value"]
+
+    if not options:
+        return
+
+    st.caption("Choose one to continue:")
+    cols = st.columns(len(options))
+    for col, option in zip(cols, options):
+        with col:
+            if st.button(option, key=f"clarification-{option}"):
+                st.session_state.pending_clarification = option
+                st.rerun()
+
+
 def render_analysis_output(sql_output, sql_result):
     analysis = sql_output.get("Analysis")
     if not analysis:
         return False
 
-    st.subheader("Answer")
+    st.subheader("Business Answer")
     st.write(analysis.get("Executive_Answer") or "No answer was returned.")
 
     clarification = analysis.get("Clarification") or {}
     if clarification.get("needed"):
         st.subheader("Clarification Needed")
-        st.info(clarification.get("question") or sql_output.get("Clarification_Question"))
+        question = clarification.get("question") or sql_output.get("Clarification_Question")
+        st.info(question)
+        render_clickable_clarifications(question)
         return True
 
     render_period_comparison(analysis.get("Period_Comparison"))
+    confidence = analysis.get("Confidence") or {}
+    st.caption(
+        f"Confidence: {confidence.get('level', 'unknown')} "
+        f"({confidence.get('score', 'n/a')})"
+    )
 
     tabs = st.tabs([
         "Assumptions",
@@ -539,6 +590,13 @@ def render_analysis_output(sql_output, sql_result):
 
     with tabs[4]:
         render_next_queries(analysis)
+
+    st.download_button(
+        "Export investigation report",
+        data=build_investigation_report(analysis),
+        file_name="ap_investigation_report.md",
+        mime="text/markdown",
+    )
 
     if sql_result is not None and not isinstance(sql_result, str):
         with st.expander("Primary result table", expanded=False):
@@ -634,7 +692,9 @@ def render_chat_tab():
             else:
                 render_assistant_message(message)
 
-    submitted_question = st.chat_input("Ask a question about the AP data")
+    submitted_question = st.session_state.pop("pending_clarification", None)
+    if submitted_question is None:
+        submitted_question = st.chat_input("Ask an AP investigation question")
 
     if submitted_question:
         user_question = submitted_question.strip()
@@ -757,10 +817,11 @@ def render_benchmark_tab():
     components.html(html_text, height=900, scrolling=True)
 
 
-st.set_page_config(page_title="NL to SQL", layout="wide")
+st.set_page_config(page_title=APP_NAME, layout="wide")
 init_session_state()
 
-st.title("NL to SQL")
+st.title(APP_NAME)
+st.caption("Turns ambiguous accounts-payable questions into evidence-backed investigation plans.")
 
 with st.sidebar:
     if st.button("New conversation", type="secondary"):
@@ -783,7 +844,7 @@ with st.sidebar:
             load_saved_chat(selected_chat_id)
             st.rerun()
 
-chat_tab, benchmark_tab = st.tabs(["Chat", "Benchmark"])
+chat_tab, benchmark_tab = st.tabs(["Investigation", "Benchmark"])
 
 with chat_tab:
     render_chat_tab()

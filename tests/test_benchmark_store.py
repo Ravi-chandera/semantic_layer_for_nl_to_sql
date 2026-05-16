@@ -1,14 +1,9 @@
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
-SRC_DIR = ROOT_DIR / "src"
-sys.path.append(str(SRC_DIR))
-
-import benchmark_store  # noqa: E402
+from src import benchmark_store
 
 
 class BenchmarkStoreTests(unittest.TestCase):

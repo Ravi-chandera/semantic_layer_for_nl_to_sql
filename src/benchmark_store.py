@@ -8,6 +8,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+try:
+    from .model_config import get_default_model_name
+except ImportError:
+    from model_config import get_default_model_name
+
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 BENCHMARK_DB_PATH = ROOT_DIR / "data" / "benchmark_results.db"
@@ -195,7 +200,7 @@ def build_benchmark_record(
     chat_id=None,
     category=None,
     expected_capability=None,
-    model_name="gemini-3-flash-preview",
+    model_name=None,
     chart_path=None,
     chart_error=None,
     error_message=None,
@@ -213,7 +218,7 @@ def build_benchmark_record(
         "expected_capability": expected_capability or inferred_capability,
         "thread_id": thread_id,
         "chat_id": chat_id,
-        "model_name": model_name,
+        "model_name": model_name or get_default_model_name(),
         "started_at": started_at,
         "ended_at": ended_at,
         "latency_ms": float(latency_ms),
