@@ -9,14 +9,17 @@ from sqlglot import errors as sqlglot_errors
 from sqlglot import exp
 
 try:
+    from .dataset_onboarding import get_active_db_path
     from .logging_config import configure_logging
     from .langfuse_tracing import safe_update_observation, traced_span
 except ImportError:
+    from dataset_onboarding import get_active_db_path
     from logging_config import configure_logging
     from langfuse_tracing import safe_update_observation, traced_span
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DB_PATH = ROOT_DIR / "data" / "assignment.db"
+SEMANTIC_LAYER_PATH = ROOT_DIR / "data" / "semantic_layer.json"
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -24,16 +27,6 @@ logger = logging.getLogger(__name__)
 MAX_RESULT_ROWS = 500
 QUERY_TIMEOUT_SECONDS = 5.0
 PROGRESS_HANDLER_OPCODES = 1_000
-
-DISPLAY_LABEL_LOOKUPS = {
-    "vendor_id": ("vendors", "id", "name", "vendor_name"),
-    "company_id": ("companies", "id", "name", "company_name"),
-    "department_id": ("departments", "id", "name", "department_name"),
-    "product_id": ("products", "id", "name", "product_name"),
-    "invoice_id": ("invoices", "id", "invoice_number", "invoice_number"),
-    "po_id": ("purchase_orders", "id", "po_number", "po_number"),
-    "grn_id": ("grns", "id", "grn_number", "grn_number"),
-}
 
 MAX_TRACE_RESULT_ROWS = 50
 
@@ -200,11 +193,79 @@ def validate_query_plan(query, cursor):
     cursor.execute(f"EXPLAIN QUERY PLAN {query}")
 
 
+def quote_identifier(identifier):
+    return f'"{str(identifier).replace(chr(34), chr(34) * 2)}"'
+
+
+def _singularize_table_name(table_name):
+    if table_name.endswith("ies"):
+        return f"{table_name[:-3]}y"
+    if table_name.endswith("s"):
+        return table_name[:-1]
+    return table_name
+
+
+def _pick_display_column(table_info):
+    columns = table_info.get("columns", {}) or {}
+    preferred = (
+        "name",
+        "title",
+        "label",
+        "code",
+        "number",
+        "reference",
+        "reference_number",
+    )
+    for column_name in preferred:
+        if column_name in columns and not columns[column_name].get("is_sensitive"):
+            return column_name
+    for column_name, column_info in columns.items():
+        column_type = str(column_info.get("type") or "").upper()
+        if column_info.get("is_sensitive"):
+            continue
+        if any(part in column_type for part in ("CHAR", "TEXT", "CLOB", "VARCHAR")):
+            return column_name
+    return None
+
+
+def _load_display_label_lookups(cursor):
+    if not SEMANTIC_LAYER_PATH.exists():
+        return {}
+    try:
+        import json
+
+        semantic_layer = json.loads(SEMANTIC_LAYER_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+    db_tables = get_db_tables(cursor)
+    lookups = {}
+    for table_name, table_info in semantic_layer.get("tables", {}).items():
+        if table_name not in db_tables:
+            continue
+        primary_key = table_info.get("primary_key")
+        if not primary_key or "," in str(primary_key):
+            continue
+        display_column = _pick_display_column(table_info)
+        if not display_column:
+            continue
+        entity_name = _singularize_table_name(table_name)
+        id_alias = f"{entity_name}_id"
+        label_alias = (
+            display_column
+            if display_column.endswith("_number")
+            else f"{entity_name}_{display_column}"
+        )
+        lookups[id_alias] = (table_name, primary_key, display_column, label_alias)
+    return lookups
+
+
 def enrich_results_with_display_labels(results, cursor):
     if not results:
         return results
 
-    for id_alias, (table_name, id_column, label_column, output_alias) in DISPLAY_LABEL_LOOKUPS.items():
+    display_label_lookups = _load_display_label_lookups(cursor)
+    for id_alias, (table_name, id_column, label_column, output_alias) in display_label_lookups.items():
         if id_alias not in results[0] or output_alias in results[0]:
             continue
 
@@ -219,7 +280,11 @@ def enrich_results_with_display_labels(results, cursor):
 
         placeholders = ",".join("?" for _ in ids)
         cursor.execute(
-            f"SELECT {id_column}, {label_column} FROM {table_name} WHERE {id_column} IN ({placeholders})",
+            (
+                f"SELECT {quote_identifier(id_column)}, {quote_identifier(label_column)} "
+                f"FROM {quote_identifier(table_name)} "
+                f"WHERE {quote_identifier(id_column)} IN ({placeholders})"
+            ),
             ids,
         )
         labels_by_id = {
@@ -233,7 +298,10 @@ def enrich_results_with_display_labels(results, cursor):
     return results
 
 
-def run_query(query, db_name=DB_PATH):
+def run_query(query, db_name=None):
+    if db_name is None:
+        db_name = get_active_db_path()
+
     with traced_span(
         "execute-sqlite-query",
         input={

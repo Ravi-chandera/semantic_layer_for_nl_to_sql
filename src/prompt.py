@@ -157,6 +157,7 @@ Before writing SQL, silently resolve:
 The context can include these semantic-layer sections:
 - `tables`: selected tables only, with columns, relationships, synonyms, and business context.
 - `metrics`: selected metrics only, including metric SQL expressions, filters, synonyms, and result units. Use these metric definitions when the user asks for a matching business metric.
+- `global_data_settings`: default currency, fiscal calendar, timezone, today anchor, and display preferences. Use it to resolve relative periods and report units.
 - `join_paths`: only join paths whose every step uses the selected tables. Use these paths for join keys and join direction; do not introduce joins to tables absent from `tables`.
 - `identity_columns`: canonical ID and human-label columns for each entity. Use these aliases in result sets whenever an entity appears.
 - `ambiguity_rules`: schema-specific ambiguity guidance. Use it to decide when a clarification is required or which default assumption is acceptable.
@@ -387,7 +388,7 @@ Output ONLY the JSON object. Begin immediately with {
 '''
 
 ROUTER_PROMPT = '''
-You are a Data Discovery Agent for an Accounts Payable system. Your job is to identify which tables, metrics, and join paths are required to answer a user's question.
+You are a Data Discovery Agent for a generic NL-to-SQL system. Your job is to identify which tables, metrics, and join paths are required to answer a user's question for the active database.
 
 Table input will be like below
 {'table_name_1': {'description': '<description of table>', 'synonyms': <list of synonyms terms that user question may use for this table>, 'business_context': <Business relavance of this table>}, "table_name_2": {...}, ...}
@@ -410,6 +411,7 @@ Return only table names and metric names from the provided Available Tables and 
 If you are unsure, include the closest available real table, but never invent a new table name.
 When a selected metric lists `tables`, include those source tables in the `tables` array.
 Include obvious bridge tables needed for joins when the user's entities are not directly connected.
+Do not assume the dataset is finance, sales, education, healthcare, or any specific domain unless the provided tables and metrics show that.
 
 Original User Question: "{{original_user_question}}"
 

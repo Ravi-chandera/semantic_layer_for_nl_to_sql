@@ -10,6 +10,8 @@ from src.pipeline import (
     normalize_sql_response_after_generation,
 )
 from src.pipeline_config import SEMANTIC_LAYER_PATH
+from src.pipeline_responses import clarification_needed_response
+from src.pipeline_semantic_context import clarification_options_from_rule
 from src.pipeline_semantic_context import find_required_clarification_rule
 from src.pipeline_semantic_context import expand_selected_tables_for_context
 
@@ -209,6 +211,55 @@ class ClarificationFlowTests(unittest.TestCase):
         )
 
         self.assertIsNone(resolved_rule)
+
+    def test_top_vendor_clarification_options_come_from_semantic_layer(self):
+        semantic_layer = load_json(SEMANTIC_LAYER_PATH)
+
+        rule = find_required_clarification_rule(
+            semantic_layer,
+            ["vendors"],
+            "Who are our top 5 vendors?",
+        )
+
+        self.assertEqual(
+            [option["label"] for option in rule["options"]],
+            [
+                "Rank by invoice value",
+                "Rank by count",
+                "Rank by vendor rating",
+                "Rank by payment value",
+            ],
+        )
+        self.assertEqual(
+            rule["options"][0]["resolution_text"],
+            "Rank top vendors by total invoice value.",
+        )
+
+    def test_clarification_options_helper_derives_labels_for_plain_dimensions(self):
+        options = clarification_options_from_rule(
+            "approval_details_ambiguity",
+            {
+                "ambiguous_dimensions": [
+                    {
+                        "label": "approval_threshold_bands",
+                        "sql_hint": "approval_matrix.min_amount",
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual(options[0]["label"], "Use Approval Threshold Bands")
+        self.assertEqual(options[0]["resolution_text"], "Use approval threshold bands.")
+
+    def test_clarification_needed_response_preserves_structured_options(self):
+        options = [{"id": "invoice_value", "label": "Rank by invoice value"}]
+
+        response = clarification_needed_response(
+            "How should I rank vendors?",
+            clarification_options=options,
+        )
+
+        self.assertEqual(response["Clarification_Options"], options)
 
 
 if __name__ == "__main__":

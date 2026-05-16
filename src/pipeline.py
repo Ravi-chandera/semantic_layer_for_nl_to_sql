@@ -12,6 +12,8 @@ from langgraph.graph import END, START, StateGraph
 
 try:
     from .cache_store import delete_cache_entry, lookup_cache, semantic_layer_hash, store_cache_entry
+    from .data_settings import data_settings_mtime_ns, load_data_settings, settings_hash_payload
+    from .entity_search import search_entities
     from .logging_config import configure_logging
     from .langfuse_tracing import safe_update_observation, traced_generation, traced_span
     from .model_config import get_default_model_name, load_environment as load_model_environment, require_gemini_api_key
@@ -68,6 +70,8 @@ try:
     )
 except ImportError:
     from cache_store import delete_cache_entry, lookup_cache, semantic_layer_hash, store_cache_entry
+    from data_settings import data_settings_mtime_ns, load_data_settings, settings_hash_payload
+    from entity_search import search_entities
     from logging_config import configure_logging
     from langfuse_tracing import safe_update_observation, traced_generation, traced_span
     from model_config import get_default_model_name, load_environment as load_model_environment, require_gemini_api_key
@@ -132,6 +136,7 @@ class NLToSQLState(TypedDict, total=False):
     resolved_question: str
     model_name: str
     semantic_layer: dict[str, Any]
+    data_settings: dict[str, Any]
     semantic_layer_hash: str
     router_tables_json: str
     router_metrics_json: str
@@ -146,6 +151,7 @@ class NLToSQLState(TypedDict, total=False):
     selected_tables: list[str]
     selected_metrics: list[str]
     sql_context: str
+    entity_search: dict[str, Any]
     clarification_prompt: str
     clarification_response_text: str
     clarification_response: dict[str, Any]
@@ -223,11 +229,18 @@ def load_json(file_path):
 
 
 @lru_cache(maxsize=4)
-def load_semantic_layer_bundle(file_path, mtime_ns):
+def load_semantic_layer_bundle(file_path, mtime_ns, settings_mtime_ns):
     semantic_layer = load_json(file_path)
-    layer_hash = semantic_layer_hash(semantic_layer)
+    data_settings = load_data_settings()
+    layer_hash = semantic_layer_hash(
+        {
+            "semantic_layer": semantic_layer,
+            **settings_hash_payload(data_settings),
+        }
+    )
     return {
         "semantic_layer": semantic_layer,
+        "data_settings": data_settings,
         "semantic_layer_hash": layer_hash,
         "router_tables_json": json.dumps(build_router_tables(semantic_layer), indent=2),
         "router_metrics_json": json.dumps(build_router_metrics(semantic_layer), indent=2),
@@ -255,6 +268,7 @@ def load_semantic_layer_node(state: NLToSQLState):
         semantic_layer_bundle = load_semantic_layer_bundle(
             str(SEMANTIC_LAYER_PATH),
             SEMANTIC_LAYER_PATH.stat().st_mtime_ns,
+            data_settings_mtime_ns(),
         )
         semantic_layer = semantic_layer_bundle["semantic_layer"]
         safe_update_observation(
@@ -263,6 +277,7 @@ def load_semantic_layer_node(state: NLToSQLState):
                 "table_count": len(semantic_layer.get("tables", {})),
                 "metric_count": len(semantic_layer.get("metrics", {})),
                 "semantic_layer_hash": semantic_layer_bundle["semantic_layer_hash"],
+                "data_settings": semantic_layer_bundle["data_settings"],
             },
         )
         return semantic_layer_bundle
@@ -553,12 +568,52 @@ def select_semantic_context_node(state: NLToSQLState):
             selected_metrics,
             semantic_layer,
         )
+        entity_search = search_entities(
+            state.get("resolved_question") or state["user_question"],
+            semantic_layer,
+        )
 
         if not selected_tables:
+            if entity_search.get("ambiguous"):
+                clarification_attempts = clarification_attempts_for_current_question(state)
+                clarifying_question = (
+                    entity_search.get("clarifying_question")
+                    or "Which entity did you mean?"
+                )
+                node_output = {
+                    "selected_tables": selected_tables,
+                    "selected_metrics": selected_metrics,
+                    "entity_search": entity_search,
+                    "clarification_response": {
+                        "clarification_needed": True,
+                        "clarifying_question": clarifying_question,
+                        "options": entity_search.get("options") or [],
+                        "can_proceed": False,
+                        "default_assumption": None,
+                        "reason": "The question matched multiple database entities before SQL generation.",
+                        "unanswerable": False,
+                        "matched_rule": "entity_disambiguation",
+                    },
+                }
+                if clarification_attempts < MAX_CLARIFICATION_ATTEMPTS:
+                    node_output["sql_response"] = clarification_needed_response(
+                        clarifying_question,
+                        clarification_attempts=clarification_attempts + 1,
+                        reason="The question matched multiple database entities before SQL generation.",
+                        clarification_options=entity_search.get("options") or [],
+                    )
+                else:
+                    node_output["sql_response"] = clarification_limit_response(
+                        "The question matched multiple database entities before SQL generation."
+                    )
+                safe_update_observation(span, output=node_output)
+                return node_output
+
             logger.warning("No valid tables selected, skipping SQL generation")
             node_output = {
                 "selected_tables": selected_tables,
                 "selected_metrics": selected_metrics,
+                "entity_search": entity_search,
                 "sql_response": no_valid_tables_response(),
             }
             safe_update_observation(
@@ -569,10 +624,24 @@ def select_semantic_context_node(state: NLToSQLState):
             )
             return node_output
 
+        sql_context = build_sql_context(
+            selected_tables,
+            selected_metrics,
+            semantic_layer,
+            state.get("data_settings"),
+        )
+        if entity_search.get("context"):
+            sql_context = (
+                sql_context
+                + "\n\nentity_matches: "
+                + json.dumps(entity_search["context"], indent=2, default=str)
+            )
+
         node_output = {
             "selected_tables": selected_tables,
             "selected_metrics": selected_metrics,
-            "sql_context": build_sql_context(selected_tables, selected_metrics, semantic_layer),
+            "entity_search": entity_search,
+            "sql_context": sql_context,
         }
         safe_update_observation(span, output=node_output)
         return node_output
@@ -601,6 +670,44 @@ def evaluate_clarification_node(state: NLToSQLState):
         },
     ) as span:
         clarification_attempts = clarification_attempts_for_current_question(state)
+        entity_search = state.get("entity_search") or {}
+        if entity_search.get("ambiguous"):
+            clarifying_question = (
+                entity_search.get("clarifying_question")
+                or "Which entity did you mean?"
+            )
+            clarification_options = entity_search.get("options") or []
+            clarification_response = {
+                "clarification_needed": True,
+                "clarifying_question": clarifying_question,
+                "options": clarification_options,
+                "can_proceed": False,
+                "default_assumption": None,
+                "reason": "The question matched multiple database entities before SQL generation.",
+                "unanswerable": False,
+                "matched_rule": "entity_disambiguation",
+            }
+            node_output = {
+                "clarification_response": clarification_response,
+                "clarification_attempts": clarification_attempts,
+                "clarification_blocks_sql": True,
+            }
+
+            if clarification_attempts < MAX_CLARIFICATION_ATTEMPTS:
+                node_output["sql_response"] = clarification_needed_response(
+                    clarifying_question,
+                    clarification_attempts=clarification_attempts + 1,
+                    reason=clarification_response["reason"],
+                    clarification_options=clarification_options,
+                )
+            else:
+                node_output["sql_response"] = clarification_limit_response(
+                    clarification_response["reason"]
+                )
+
+            safe_update_observation(span, output=node_output)
+            return node_output
+
         forced_clarification = find_required_clarification_rule(
             state["semantic_layer"],
             state.get("selected_tables", []),
@@ -611,9 +718,11 @@ def evaluate_clarification_node(state: NLToSQLState):
                 forced_clarification.get("clarifying_question")
                 or "Can you clarify the business meaning you want analyzed?"
             )
+            clarification_options = forced_clarification.get("options") or []
             clarification_response = {
                 "clarification_needed": True,
                 "clarifying_question": clarifying_question,
+                "options": clarification_options,
                 "can_proceed": False,
                 "default_assumption": None,
                 "reason": forced_clarification.get("reason"),
@@ -631,6 +740,7 @@ def evaluate_clarification_node(state: NLToSQLState):
                     clarifying_question,
                     clarification_attempts=clarification_attempts + 1,
                     reason=forced_clarification.get("reason"),
+                    clarification_options=clarification_options,
                 )
             else:
                 node_output["sql_response"] = clarification_limit_response(
@@ -936,9 +1046,12 @@ def generate_sql_for_question(user_question, model_name=None, thread_id=None):
     sql_response["Cache_Hit"] = result.get("cache_hit", False)
     sql_response["Cache_Strategy"] = result.get("cache_strategy")
     sql_response["Cache_Score"] = result.get("cache_score")
+    sql_response["Entity_Search"] = result.get("entity_search") or None
 
     clarification_response = result.get("clarification_response", {})
     sql_response["Clarification_Decision"] = clarification_response or None
+    if not sql_response.get("Clarification_Options"):
+        sql_response["Clarification_Options"] = clarification_response.get("options") or []
     sql_response["Requires_Clarification"] = bool(sql_response.get("Requires_Clarification"))
     sql_response["Clarification_Question"] = sql_response.get("Clarification_Question")
     sql_response["Clarification_Attempts"] = sql_response.get("Clarification_Attempts", 0)
