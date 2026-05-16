@@ -1,24 +1,13 @@
-import importlib.util
 import json
-import sys
 import unittest
-from pathlib import Path
 
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
-SRC_DIR = ROOT_DIR / "src"
-sys.path.append(str(SRC_DIR))
-
-import pipeline  # noqa: E402
-from pipeline_responses import is_executable_sql  # noqa: E402
+from src import pipeline, sqlite_runner
+from src.pipeline_responses import is_executable_sql
 
 
 def load_sql_runner():
-    module_path = SRC_DIR / "02_run_sql_on_sqlite.py"
-    spec = importlib.util.spec_from_file_location("sqlite_runner", module_path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return sqlite_runner
 
 
 class ClarificationSmokeScript(unittest.TestCase):

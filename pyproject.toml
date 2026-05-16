@@ -1,7 +1,7 @@
 [project]
 name = "semantic-layer-for-nl-to-sql"
 version = "0.1.0"
-description = "Add your description here"
+description = "AP investigation analyst copilot that maps natural-language accounts-payable questions to governed SQLite SQL."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -11,5 +11,6 @@ dependencies = [
     "langgraph>=1.1.10",
     "plotly>=6.7.0",
     "sentence-transformers>=3.0.0",
+    "sqlglot>=30.8.0",
     "streamlit>=1.45.0",
 ]

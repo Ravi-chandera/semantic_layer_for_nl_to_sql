@@ -1,12 +1,21 @@
 import json
 
-from pipeline_config import (
-    MAX_CLARIFICATION_ATTEMPTS,
-    MAX_MEMORY_FIELD_CHARS,
-    MAX_MEMORY_SQL_CHARS,
-    MAX_MEMORY_TURNS,
-    RESULT_SAMPLE_ROWS,
-)
+try:
+    from .pipeline_config import (
+        MAX_CLARIFICATION_ATTEMPTS,
+        MAX_MEMORY_FIELD_CHARS,
+        MAX_MEMORY_SQL_CHARS,
+        MAX_MEMORY_TURNS,
+        RESULT_SAMPLE_ROWS,
+    )
+except ImportError:
+    from pipeline_config import (
+        MAX_CLARIFICATION_ATTEMPTS,
+        MAX_MEMORY_FIELD_CHARS,
+        MAX_MEMORY_SQL_CHARS,
+        MAX_MEMORY_TURNS,
+        RESULT_SAMPLE_ROWS,
+    )
 
 
 def truncate_text(value, max_chars):

@@ -1,13 +1,23 @@
 import json
 
-from pipeline_config import MAX_CLARIFICATION_ATTEMPTS
-from pipeline_semantic_context import build_router_metrics, build_router_tables
-from prompt import (
-    CLARIFICATION_PROMPT,
-    QUESTION_RESOLUTION_PROMPT,
-    ROUTER_PROMPT,
-    SQL_GENERATION_PROMPT,
-)
+try:
+    from .pipeline_config import MAX_CLARIFICATION_ATTEMPTS
+    from .pipeline_semantic_context import build_router_metrics, build_router_tables
+    from .prompt import (
+        CLARIFICATION_PROMPT,
+        QUESTION_RESOLUTION_PROMPT,
+        ROUTER_PROMPT,
+        SQL_GENERATION_PROMPT,
+    )
+except ImportError:
+    from pipeline_config import MAX_CLARIFICATION_ATTEMPTS
+    from pipeline_semantic_context import build_router_metrics, build_router_tables
+    from prompt import (
+        CLARIFICATION_PROMPT,
+        QUESTION_RESOLUTION_PROMPT,
+        ROUTER_PROMPT,
+        SQL_GENERATION_PROMPT,
+    )
 
 
 def create_question_resolution_prompt(conversation_context, user_question):

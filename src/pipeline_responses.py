@@ -1,11 +1,19 @@
 import re
 
-from pipeline_config import (
-    INSUFFICIENT_DATA_PREFIX,
-    MAX_CLARIFICATION_ATTEMPTS,
-    MAX_MEMORY_FIELD_CHARS,
-)
-from pipeline_memory import clarification_attempts_for_current_question, truncate_text
+try:
+    from .pipeline_config import (
+        INSUFFICIENT_DATA_PREFIX,
+        MAX_CLARIFICATION_ATTEMPTS,
+        MAX_MEMORY_FIELD_CHARS,
+    )
+    from .pipeline_memory import clarification_attempts_for_current_question, truncate_text
+except ImportError:
+    from pipeline_config import (
+        INSUFFICIENT_DATA_PREFIX,
+        MAX_CLARIFICATION_ATTEMPTS,
+        MAX_MEMORY_FIELD_CHARS,
+    )
+    from pipeline_memory import clarification_attempts_for_current_question, truncate_text
 
 
 EXECUTABLE_SQL_PATTERN = re.compile(

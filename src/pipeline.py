@@ -1,8 +1,6 @@
-import os
 import time
 import uuid
 
-from dotenv import load_dotenv
 from google import genai
 import json
 import logging
@@ -12,61 +10,118 @@ from typing import Any, Literal, TypedDict
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
-from cache_store import delete_cache_entry, lookup_cache, semantic_layer_hash, store_cache_entry
-from logging_config import configure_logging
-from langfuse_tracing import safe_update_observation, traced_generation, traced_span
-from pipeline_config import (
-    INSUFFICIENT_DATA_PREFIX,
-    MAX_CLARIFICATION_ATTEMPTS,
-    MAX_MEMORY_FIELD_CHARS,
-    MAX_MEMORY_SQL_CHARS,
-    MAX_MEMORY_TURNS,
-    RESULT_SAMPLE_ROWS,
-    ROOT_DIR,
-    SEMANTIC_LAYER_PATH,
-)
-from pipeline_memory import (
-    active_conversation_context,
-    clarification_attempts_for_current_question,
-    compact_turn_for_memory,
-    format_conversation_context,
-    latest_pending_clarification_turn,
-    sql_generation_conversation_context,
-    summarize_sql_result,
-    trim_conversation_turns,
-    truncate_text,
-)
-from pipeline_prompt_builders import (
-    create_clarification_prompt,
-    create_question_resolution_prompt,
-    create_router_prompt,
-    create_sql_prompt,
-)
-from pipeline_responses import (
-    EXECUTABLE_SQL_PATTERN,
-    build_sql_response,
-    clarification_limit_response,
-    clarification_needed_response,
-    is_executable_sql,
-    non_executable_sql_response,
-    no_valid_tables_response,
-    normalize_sql_response_after_generation,
-)
-from pipeline_semantic_context import (
-    build_identity_column_context,
-    build_router_metrics,
-    build_router_tables,
-    build_sql_context,
-    entity_alias_for_table,
-    expand_selected_tables_for_context,
-    filter_join_paths_for_tables,
-    find_required_clarification_rule,
-    label_alias_for_entity,
-    pick_display_column,
-    select_valid_metrics,
-    select_valid_tables,
-    singularize_table_name,
-)
+try:
+    from .cache_store import delete_cache_entry, lookup_cache, semantic_layer_hash, store_cache_entry
+    from .logging_config import configure_logging
+    from .langfuse_tracing import safe_update_observation, traced_generation, traced_span
+    from .model_config import get_default_model_name, load_environment as load_model_environment, require_gemini_api_key
+    from .pipeline_config import (
+        INSUFFICIENT_DATA_PREFIX,
+        MAX_CLARIFICATION_ATTEMPTS,
+        MAX_MEMORY_FIELD_CHARS,
+        MAX_MEMORY_SQL_CHARS,
+        MAX_MEMORY_TURNS,
+        RESULT_SAMPLE_ROWS,
+        SEMANTIC_LAYER_PATH,
+    )
+    from .pipeline_memory import (
+        active_conversation_context,
+        clarification_attempts_for_current_question,
+        compact_turn_for_memory,
+        format_conversation_context,
+        latest_pending_clarification_turn,
+        sql_generation_conversation_context,
+        summarize_sql_result,
+        trim_conversation_turns,
+        truncate_text,
+    )
+    from .pipeline_prompt_builders import (
+        create_clarification_prompt,
+        create_question_resolution_prompt,
+        create_router_prompt,
+        create_sql_prompt,
+    )
+    from .pipeline_responses import (
+        EXECUTABLE_SQL_PATTERN,
+        build_sql_response,
+        clarification_limit_response,
+        clarification_needed_response,
+        is_executable_sql,
+        non_executable_sql_response,
+        no_valid_tables_response,
+        normalize_sql_response_after_generation,
+    )
+    from .pipeline_semantic_context import (
+        build_identity_column_context,
+        build_router_metrics,
+        build_router_tables,
+        build_sql_context,
+        entity_alias_for_table,
+        expand_selected_tables_for_context,
+        filter_join_paths_for_tables,
+        find_required_clarification_rule,
+        label_alias_for_entity,
+        pick_display_column,
+        select_valid_metrics,
+        select_valid_tables,
+        singularize_table_name,
+    )
+except ImportError:
+    from cache_store import delete_cache_entry, lookup_cache, semantic_layer_hash, store_cache_entry
+    from logging_config import configure_logging
+    from langfuse_tracing import safe_update_observation, traced_generation, traced_span
+    from model_config import get_default_model_name, load_environment as load_model_environment, require_gemini_api_key
+    from pipeline_config import (
+        INSUFFICIENT_DATA_PREFIX,
+        MAX_CLARIFICATION_ATTEMPTS,
+        MAX_MEMORY_FIELD_CHARS,
+        MAX_MEMORY_SQL_CHARS,
+        MAX_MEMORY_TURNS,
+        RESULT_SAMPLE_ROWS,
+        SEMANTIC_LAYER_PATH,
+    )
+    from pipeline_memory import (
+        active_conversation_context,
+        clarification_attempts_for_current_question,
+        compact_turn_for_memory,
+        format_conversation_context,
+        latest_pending_clarification_turn,
+        sql_generation_conversation_context,
+        summarize_sql_result,
+        trim_conversation_turns,
+        truncate_text,
+    )
+    from pipeline_prompt_builders import (
+        create_clarification_prompt,
+        create_question_resolution_prompt,
+        create_router_prompt,
+        create_sql_prompt,
+    )
+    from pipeline_responses import (
+        EXECUTABLE_SQL_PATTERN,
+        build_sql_response,
+        clarification_limit_response,
+        clarification_needed_response,
+        is_executable_sql,
+        non_executable_sql_response,
+        no_valid_tables_response,
+        normalize_sql_response_after_generation,
+    )
+    from pipeline_semantic_context import (
+        build_identity_column_context,
+        build_router_metrics,
+        build_router_tables,
+        build_sql_context,
+        entity_alias_for_table,
+        expand_selected_tables_for_context,
+        filter_join_paths_for_tables,
+        find_required_clarification_rule,
+        label_alias_for_entity,
+        pick_display_column,
+        select_valid_metrics,
+        select_valid_tables,
+        singularize_table_name,
+    )
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -108,7 +163,7 @@ class NLToSQLState(TypedDict, total=False):
 
 @lru_cache(maxsize=1)
 def load_environment():
-    load_dotenv(ROOT_DIR / ".env", override=True)
+    load_model_environment()
 
 
 @lru_cache(maxsize=4)
@@ -117,11 +172,8 @@ def get_gemini_client(api_key):
 
 
 def gemini_call(model_name, contents, trace_name="gemini-generate-content"):
-    load_environment()
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY is not set. Update your .env file or environment variables.")
-
+    api_key = require_gemini_api_key()
+    model_name = model_name or get_default_model_name()
     client = get_gemini_client(api_key)
     model_parameters = {
         "temperature": 0,
@@ -862,7 +914,8 @@ def build_thread_config(thread_id):
     return {"configurable": {"thread_id": thread_id}}
 
 
-def generate_sql_for_question(user_question, model_name="gemini-3-flash-preview", thread_id=None):
+def generate_sql_for_question(user_question, model_name=None, thread_id=None):
+    model_name = model_name or get_default_model_name()
     resolved_thread_id = thread_id or f"single-turn-{uuid.uuid4()}"
     result = NL_TO_SQL_GRAPH.invoke(
         {

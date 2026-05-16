@@ -1,6 +1,3 @@
-import os
-
-from dotenv import load_dotenv
 from google import genai
 import json
 import logging
@@ -9,9 +6,16 @@ from pathlib import Path
 
 import plotly.express as px
 
-from logging_config import configure_logging
-from langfuse_tracing import safe_update_observation, traced_generation, traced_span
-from prompt import CHART_AGENT_PROMPT
+try:
+    from .logging_config import configure_logging
+    from .langfuse_tracing import safe_update_observation, traced_generation, traced_span
+    from .model_config import get_default_model_name, load_environment as load_model_environment, require_gemini_api_key
+    from .prompt import CHART_AGENT_PROMPT
+except ImportError:
+    from logging_config import configure_logging
+    from langfuse_tracing import safe_update_observation, traced_generation, traced_span
+    from model_config import get_default_model_name, load_environment as load_model_environment, require_gemini_api_key
+    from prompt import CHART_AGENT_PROMPT
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 CHARTS_DIR = ROOT_DIR / "charts"
@@ -37,7 +41,7 @@ CHART_FUNCTION_ALIASES = {
 
 @lru_cache(maxsize=1)
 def load_environment():
-    load_dotenv(ROOT_DIR / ".env", override=True)
+    load_model_environment()
 
 
 @lru_cache(maxsize=4)
@@ -46,11 +50,8 @@ def get_gemini_client(api_key):
 
 
 def gemini_call(model_name, contents, trace_name="gemini-chart-planner"):
-    load_environment()
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY is not set. Update your .env file or environment variables.")
-
+    api_key = require_gemini_api_key()
+    model_name = model_name or get_default_model_name()
     client = get_gemini_client(api_key)
     with traced_generation(
         trace_name,
@@ -207,7 +208,8 @@ def save_chart_html(fig):
     return chart_path
 
 
-def generate_chart_for_result(user_question, chart_hint, sql_result, model_name="gemini-3-flash-preview"):
+def generate_chart_for_result(user_question, chart_hint, sql_result, model_name=None):
+    model_name = model_name or get_default_model_name()
     with traced_span(
         "plan-and-render-chart",
         input={

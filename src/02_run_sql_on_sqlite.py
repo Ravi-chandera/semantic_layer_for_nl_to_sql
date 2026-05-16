@@ -1,10 +1,19 @@
 import sqlite3
 import logging
-import re
+import time
 from pathlib import Path
+from urllib.parse import quote
 
-from logging_config import configure_logging
-from langfuse_tracing import safe_update_observation, traced_span
+import sqlglot
+from sqlglot import errors as sqlglot_errors
+from sqlglot import exp
+
+try:
+    from .logging_config import configure_logging
+    from .langfuse_tracing import safe_update_observation, traced_span
+except ImportError:
+    from logging_config import configure_logging
+    from langfuse_tracing import safe_update_observation, traced_span
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DB_PATH = ROOT_DIR / "data" / "assignment.db"
@@ -12,11 +21,9 @@ DB_PATH = ROOT_DIR / "data" / "assignment.db"
 configure_logging()
 logger = logging.getLogger(__name__)
 
-BLOCKED_SQL_OPERATIONS = ("INSERT", "UPDATE", "DELETE")
-READ_QUERY_PATTERN = re.compile(
-    r"^\s*(?:(?:--[^\n]*(?:\n|$)|/\*.*?\*/)\s*)*(?:SELECT|WITH)\b",
-    re.IGNORECASE | re.DOTALL,
-)
+MAX_RESULT_ROWS = 500
+QUERY_TIMEOUT_SECONDS = 5.0
+PROGRESS_HANDLER_OPCODES = 1_000
 
 DISPLAY_LABEL_LOOKUPS = {
     "vendor_id": ("vendors", "id", "name", "vendor_name"),
@@ -29,6 +36,80 @@ DISPLAY_LABEL_LOOKUPS = {
 }
 
 MAX_TRACE_RESULT_ROWS = 50
+
+SQLITE_WRITE_ACTIONS = {
+    sqlite3.SQLITE_ALTER_TABLE,
+    sqlite3.SQLITE_ATTACH,
+    sqlite3.SQLITE_CREATE_INDEX,
+    sqlite3.SQLITE_CREATE_TABLE,
+    sqlite3.SQLITE_CREATE_TEMP_INDEX,
+    sqlite3.SQLITE_CREATE_TEMP_TABLE,
+    sqlite3.SQLITE_CREATE_TEMP_TRIGGER,
+    sqlite3.SQLITE_CREATE_TEMP_VIEW,
+    sqlite3.SQLITE_CREATE_TRIGGER,
+    sqlite3.SQLITE_CREATE_VIEW,
+    sqlite3.SQLITE_CREATE_VTABLE,
+    sqlite3.SQLITE_DELETE,
+    sqlite3.SQLITE_DETACH,
+    sqlite3.SQLITE_DROP_INDEX,
+    sqlite3.SQLITE_DROP_TABLE,
+    sqlite3.SQLITE_DROP_TEMP_INDEX,
+    sqlite3.SQLITE_DROP_TEMP_TABLE,
+    sqlite3.SQLITE_DROP_TEMP_TRIGGER,
+    sqlite3.SQLITE_DROP_TEMP_VIEW,
+    sqlite3.SQLITE_DROP_TRIGGER,
+    sqlite3.SQLITE_DROP_VIEW,
+    sqlite3.SQLITE_DROP_VTABLE,
+    sqlite3.SQLITE_INSERT,
+    sqlite3.SQLITE_PRAGMA,
+    sqlite3.SQLITE_TRANSACTION,
+    sqlite3.SQLITE_UPDATE,
+}
+
+BLOCKED_FUNCTIONS = {"load_extension"}
+
+
+def connect_read_only(db_name):
+    if str(db_name) == ":memory:":
+        return sqlite3.connect(db_name)
+
+    db_path = Path(db_name).resolve()
+    db_uri = f"file:{quote(db_path.as_posix(), safe='/:')}?mode=ro"
+    return sqlite3.connect(db_uri, uri=True, timeout=1.0)
+
+
+def build_sqlite_authorizer():
+    def authorizer(action_code, arg1, arg2, database_name, trigger_name):
+        if action_code in SQLITE_WRITE_ACTIONS:
+            logger.error(
+                "SQLite authorizer blocked action=%s arg1=%s arg2=%s db=%s trigger=%s",
+                action_code,
+                arg1,
+                arg2,
+                database_name,
+                trigger_name,
+            )
+            return sqlite3.SQLITE_DENY
+
+        if action_code == sqlite3.SQLITE_FUNCTION and (arg2 or "").lower() in BLOCKED_FUNCTIONS:
+            logger.error("SQLite authorizer blocked function: %s", arg2)
+            return sqlite3.SQLITE_DENY
+
+        return sqlite3.SQLITE_OK
+
+    return authorizer
+
+
+def install_query_timeout(conn, timeout_seconds=None):
+    if timeout_seconds is None:
+        timeout_seconds = QUERY_TIMEOUT_SECONDS
+
+    deadline = time.monotonic() + timeout_seconds
+
+    def progress_handler():
+        return 1 if time.monotonic() > deadline else 0
+
+    conn.set_progress_handler(progress_handler, PROGRESS_HANDLER_OPCODES)
 
 
 def summarize_result_for_trace(result):
@@ -46,27 +127,36 @@ def summarize_result_for_trace(result):
     return {"status": "unknown", "value": result}
 
 
-def remove_sql_literals_and_comments(query):
-    without_comments = re.sub(r"--.*?$|/\*.*?\*/", " ", query, flags=re.MULTILINE | re.DOTALL)
-    return re.sub(r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"", " ", without_comments)
+def parse_sql_statement(query):
+    try:
+        statements = [statement for statement in sqlglot.parse(query, read="sqlite") if statement]
+    except sqlglot_errors.ParseError as e:
+        logger.error("SQL guardrail could not parse query: %s", e)
+        return None, f"SQL Guardrail Error: could not parse SQL: {e}"
+
+    if len(statements) != 1:
+        logger.error("SQL guardrail blocked statement count: %s", len(statements))
+        return None, "SQL Guardrail Error: exactly one read-only SQL statement is allowed."
+
+    return statements[0], None
+
+
+def is_read_only_statement(statement):
+    return isinstance(statement, exp.Query)
 
 
 def validate_sql_guardrails(query):
-    if not READ_QUERY_PATTERN.match(query):
+    statement, parse_error = parse_sql_statement(query)
+
+    if parse_error:
+        return None, parse_error
+
+    if not is_read_only_statement(statement):
         logger.error("SQL guardrail blocked non-read query")
-        return "SQL Guardrail Error: only SELECT/WITH read queries are allowed."
-
-    searchable_query = remove_sql_literals_and_comments(query)
-    blocked_pattern = rf"\b({'|'.join(BLOCKED_SQL_OPERATIONS)})\b"
-    blocked_matches = sorted(set(re.findall(blocked_pattern, searchable_query, flags=re.IGNORECASE)))
-
-    if blocked_matches:
-        blocked_operations = [operation.upper() for operation in blocked_matches]
-        logger.error("SQL guardrail blocked operation(s): %s", blocked_operations)
-        return f"SQL Guardrail Error: write operations are not allowed: {blocked_operations}"
+        return None, "SQL Guardrail Error: only SELECT/WITH read queries are allowed."
 
     logger.info("SQL guardrail passed")
-    return None
+    return statement, None
 
 
 def get_db_tables(cursor):
@@ -77,19 +167,24 @@ def get_db_tables(cursor):
     return {row["name"] for row in cursor.fetchall()}
 
 
-def find_query_tables(query):
-    table_pattern = r"\b(?:FROM|JOIN)\s+([A-Za-z_][A-Za-z0-9_]*)"
-    cte_pattern = r"(?:WITH|,)\s+([A-Za-z_][A-Za-z0-9_]*)\s+AS\s*\("
-
-    query_tables = set(re.findall(table_pattern, query, flags=re.IGNORECASE))
-    cte_tables = set(re.findall(cte_pattern, query, flags=re.IGNORECASE))
+def find_query_tables(statement):
+    cte_tables = {
+        cte.alias_or_name
+        for cte in statement.find_all(exp.CTE)
+        if cte.alias_or_name
+    }
+    query_tables = {
+        table.name
+        for table in statement.find_all(exp.Table)
+        if table.name
+    }
 
     return query_tables - cte_tables
 
 
-def validate_query_tables(query, cursor):
+def validate_query_tables(statement, cursor):
     db_tables = get_db_tables(cursor)
-    query_tables = find_query_tables(query)
+    query_tables = find_query_tables(statement)
     missing_tables = sorted(query_tables - db_tables)
 
     logger.info("Tables used by SQL: %s", sorted(query_tables))
@@ -147,12 +242,15 @@ def run_query(query, db_name=DB_PATH):
         },
         metadata={"component": "sqlite"},
     ) as span:
-        conn = sqlite3.connect(db_name)
+        conn = connect_read_only(db_name)
         conn.row_factory = sqlite3.Row
 
         try:
+            conn.execute("PRAGMA query_only = ON;")
+            conn.set_authorizer(build_sqlite_authorizer())
+            install_query_timeout(conn)
             cursor = conn.cursor()
-            guardrail_error = validate_sql_guardrails(query)
+            statement, guardrail_error = validate_sql_guardrails(query)
 
             if guardrail_error:
                 safe_update_observation(
@@ -163,7 +261,7 @@ def run_query(query, db_name=DB_PATH):
                 )
                 return guardrail_error
 
-            validation_error = validate_query_tables(query, cursor)
+            validation_error = validate_query_tables(statement, cursor)
 
             if validation_error:
                 safe_update_observation(
@@ -177,9 +275,9 @@ def run_query(query, db_name=DB_PATH):
             validate_query_plan(query, cursor)
             logger.info("Running SQL query")
             cursor.execute(query)
-            rows = cursor.fetchall()
+            rows = cursor.fetchmany(MAX_RESULT_ROWS + 1)
 
-            results = [dict(row) for row in rows]
+            results = [dict(row) for row in rows[:MAX_RESULT_ROWS]]
             results = enrich_results_with_display_labels(results, cursor)
             logger.info("Returned %s rows", len(results))
             safe_update_observation(span, output=summarize_result_for_trace(results))
