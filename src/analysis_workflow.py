@@ -6,6 +6,12 @@ from functools import lru_cache
 from typing import Any
 
 try:
+    from .answer_modes import (
+        DEFAULT_ANSWER_MODE,
+        apply_answer_mode_to_sql_output,
+        normalize_answer_mode,
+    )
+    from .data_settings import format_currency, format_date, load_data_settings
     from . import sqlite_runner
     from .langfuse_tracing import safe_update_observation, traced_span
     from .model_config import get_default_model_name
@@ -18,6 +24,12 @@ try:
     )
     from .pipeline_config import SEMANTIC_LAYER_PATH
 except ImportError:
+    from answer_modes import (
+        DEFAULT_ANSWER_MODE,
+        apply_answer_mode_to_sql_output,
+        normalize_answer_mode,
+    )
+    from data_settings import format_currency, format_date, load_data_settings
     import sqlite_runner
     from langfuse_tracing import safe_update_observation, traced_span
     from model_config import get_default_model_name
@@ -71,12 +83,18 @@ def _safe_percent_change(current_value, previous_value):
     return ((current - previous) / abs(previous)) * 100.0
 
 
-def _format_money(value, unit="INR"):
-    if value is None:
-        return f"{unit} n/a"
+def _format_money(value, unit=None, settings=None):
+    resolved_settings = load_data_settings() if settings is None else settings
+    if unit:
+        resolved_settings = {
+            **resolved_settings,
+            "default_currency": unit,
+        }
+    return format_currency(value, resolved_settings)
 
-    amount = _safe_float(value)
-    return f"{unit} {amount:,.2f}"
+
+def _format_month_label(value, settings=None):
+    return format_date(value, settings or load_data_settings(), kind="month")
 
 
 def _format_percent(value):
@@ -104,6 +122,153 @@ def _extract_sql_tables(sql):
         )
     )
     return sorted(table_names - cte_names)
+
+
+def _quote_identifier(identifier):
+    return f'"{str(identifier).replace(chr(34), chr(34) * 2)}"'
+
+
+def _sql_table(table_name, alias=None):
+    if alias:
+        return f"{_quote_identifier(table_name)} AS {_quote_identifier(alias)}"
+    return _quote_identifier(table_name)
+
+
+def _sql_col(column_name, alias=None):
+    if alias:
+        return f"{_quote_identifier(alias)}.{_quote_identifier(column_name)}"
+    return _quote_identifier(column_name)
+
+
+def _is_numeric_semantic_column(column_info):
+    column_type = str(column_info.get("type") or "").upper()
+    return bool(column_info.get("is_metric")) or any(
+        part in column_type
+        for part in ("INT", "REAL", "NUM", "DEC", "DOUBLE", "FLOAT")
+    )
+
+
+def _is_text_semantic_column(column_info):
+    column_type = str(column_info.get("type") or "").upper()
+    return any(part in column_type for part in ("CHAR", "TEXT", "CLOB", "VARCHAR"))
+
+
+def _is_date_semantic_column(column_name, column_info):
+    normalized = str(column_name or "").lower()
+    column_type = str(column_info.get("type") or "").upper()
+    return (
+        "DATE" in column_type
+        or "TIME" in column_type
+        or normalized.endswith("_date")
+        or normalized.endswith("_at")
+        or normalized in {"date", "month", "year"}
+    )
+
+
+def _is_category_semantic_column(column_name, column_info):
+    normalized = str(column_name or "").lower()
+    if column_info.get("enum_values"):
+        return True
+    if not _is_text_semantic_column(column_info):
+        return False
+    category_terms = ("status", "type", "category", "segment", "state", "mode", "class")
+    return any(term in normalized for term in category_terms)
+
+
+def _display_name_for_table(table_name, table_info):
+    return (
+        table_info.get("business_name")
+        or table_info.get("description")
+        or table_name.replace("_", " ")
+    )
+
+
+def _semantic_profile(semantic_layer):
+    profiles = {}
+    for table_name, table_info in semantic_layer.get("tables", {}).items():
+        columns = table_info.get("columns", {}) or {}
+        profile = {
+            "table": table_name,
+            "description": table_info.get("description"),
+            "business_context": table_info.get("business_context"),
+            "metric_columns": [],
+            "numeric_columns": [],
+            "date_columns": [],
+            "category_columns": [],
+            "display_columns": [],
+        }
+        primary_keys = {
+            part.strip()
+            for part in str(table_info.get("primary_key") or "").split(",")
+            if part.strip()
+        }
+        for column_name, column_info in columns.items():
+            normalized_column = str(column_name or "").lower()
+            is_identifier = (
+                normalized_column == "id"
+                or normalized_column.endswith("_id")
+                or column_name in primary_keys
+            )
+            if _is_numeric_semantic_column(column_info) and not is_identifier:
+                profile["numeric_columns"].append(column_name)
+                if column_info.get("is_metric") and not is_identifier:
+                    profile["metric_columns"].append(column_name)
+            if _is_date_semantic_column(column_name, column_info):
+                profile["date_columns"].append(column_name)
+            if _is_category_semantic_column(column_name, column_info):
+                profile["category_columns"].append(column_name)
+            if _is_text_semantic_column(column_info) and not column_info.get("is_sensitive"):
+                profile["display_columns"].append(column_name)
+        if not profile["metric_columns"]:
+            profile["metric_columns"] = profile["numeric_columns"][:3]
+        profiles[table_name] = profile
+    return profiles
+
+
+def _table_analysis_score(table_name, profile, semantic_layer):
+    table_info = semantic_layer.get("tables", {}).get(table_name, {})
+    relationship_count = len(table_info.get("relationships") or [])
+    incoming_relationship_count = sum(
+        1
+        for other_table in semantic_layer.get("tables", {}).values()
+        for relationship in other_table.get("relationships") or []
+        if relationship.get("target_table") == table_name
+    )
+    return (
+        len(profile.get("metric_columns") or []) * 4
+        + len(profile.get("date_columns") or []) * 3
+        + len(profile.get("category_columns") or []) * 2
+        + relationship_count
+        + incoming_relationship_count
+    )
+
+
+def _ordered_profiles_for_analysis(semantic_layer, profiles):
+    return sorted(
+        profiles.items(),
+        key=lambda item: (
+            _table_analysis_score(item[0], item[1], semantic_layer),
+            item[0],
+        ),
+        reverse=True,
+    )
+
+
+def _safe_alias(value):
+    alias = re.sub(r"[^A-Za-z0-9_]+", "_", str(value or "")).strip("_").lower()
+    if not alias or alias[0].isdigit():
+        alias = f"field_{alias}"
+    return alias[:48]
+
+
+def _count_query_for_table(table_name):
+    return EvidenceQuery(
+        name=f"{_safe_alias(table_name)}_row_count",
+        purpose=f"Count available records in {table_name}.",
+        sql=f"SELECT COUNT(*) AS row_count FROM {_quote_identifier(table_name)};",
+        tables=[table_name],
+        columns=[],
+    )
 
 
 def _metric_definition(semantic_layer, metric_name):
@@ -204,248 +369,38 @@ def _run_evidence_query(query: EvidenceQuery, sql_runner):
     }
 
 
-def _data_freshness_sql():
-    return """
-SELECT
-  MIN(invoice_date) AS min_invoice_date,
-  MAX(invoice_date) AS max_invoice_date,
-  COUNT(*) AS invoice_rows,
-  SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END) AS paid_invoice_rows
-FROM invoices;
-""".strip()
+def build_metric_driver_evidence_queries(metric_name=None, semantic_layer=None):
+    semantic_layer = semantic_layer or load_json(str(SEMANTIC_LAYER_PATH))
+    metric = semantic_layer.get("metrics", {}).get(metric_name or "")
+    if metric and metric.get("tables"):
+        source_tables = [table for table in metric.get("tables", []) if table in semantic_layer.get("tables", {})]
+        focused_layer = {
+            **semantic_layer,
+            "tables": {
+                table: semantic_layer["tables"][table]
+                for table in source_tables
+            },
+            "metrics": {metric_name: metric},
+        }
+        queries = build_dataset_analysis_plan(focused_layer, max_queries=5)
+        return [
+            EvidenceQuery(
+                name=query.name,
+                purpose=query.purpose,
+                sql=query.sql,
+                tables=query.tables,
+                columns=query.columns,
+                metric=query.metric or metric_name,
+            )
+            for query in queries
+        ]
 
-
-def _revenue_period_comparison_sql():
-    return """
-WITH bounds AS (
-  SELECT
-    MAX(invoice_date) AS max_invoice_date,
-    date(MAX(invoice_date), 'start of month', '-1 month') AS current_start,
-    date(MAX(invoice_date), 'start of month') AS current_end_exclusive,
-    date(MAX(invoice_date), 'start of month', '-2 months') AS previous_start,
-    date(MAX(invoice_date), 'start of month', '-1 month') AS previous_end_exclusive
-  FROM invoices
-),
-periods AS (
-  SELECT
-    'previous_period' AS period_key,
-    previous_start AS period_start,
-    previous_end_exclusive AS period_end_exclusive,
-    max_invoice_date
-  FROM bounds
-  UNION ALL
-  SELECT
-    'current_period' AS period_key,
-    current_start AS period_start,
-    current_end_exclusive AS period_end_exclusive,
-    max_invoice_date
-  FROM bounds
-)
-SELECT
-  p.period_key,
-  p.period_start,
-  date(p.period_end_exclusive, '-1 day') AS period_end,
-  p.max_invoice_date AS data_max_invoice_date,
-  ROUND(COALESCE(SUM(CASE WHEN i.status = 'paid' THEN COALESCE(i.grand_total, 0) ELSE 0 END), 0), 2) AS revenue,
-  SUM(CASE WHEN i.status = 'paid' THEN 1 ELSE 0 END) AS paid_invoice_count,
-  ROUND(AVG(CASE WHEN i.status = 'paid' THEN COALESCE(i.grand_total, 0) END), 2) AS average_paid_invoice_value
-FROM periods AS p
-LEFT JOIN invoices AS i
-  ON i.invoice_date >= p.period_start
- AND i.invoice_date < p.period_end_exclusive
-GROUP BY
-  p.period_key,
-  p.period_start,
-  p.period_end_exclusive,
-  p.max_invoice_date
-ORDER BY
-  p.period_start;
-""".strip()
-
-
-def _revenue_monthly_trend_sql():
-    return """
-WITH bounds AS (
-  SELECT
-    date(MAX(invoice_date), 'start of month') AS incomplete_month_start,
-    date(MAX(invoice_date), 'start of month', '-8 months') AS trend_start
-  FROM invoices
-)
-SELECT
-  strftime('%Y-%m', i.invoice_date) AS month,
-  ROUND(SUM(CASE WHEN i.status = 'paid' THEN COALESCE(i.grand_total, 0) ELSE 0 END), 2) AS revenue,
-  SUM(CASE WHEN i.status = 'paid' THEN 1 ELSE 0 END) AS paid_invoice_count,
-  ROUND(AVG(CASE WHEN i.status = 'paid' THEN COALESCE(i.grand_total, 0) END), 2) AS average_paid_invoice_value
-FROM invoices AS i
-CROSS JOIN bounds AS b
-WHERE i.invoice_date >= b.trend_start
-  AND i.invoice_date < b.incomplete_month_start
-GROUP BY
-  strftime('%Y-%m', i.invoice_date)
-ORDER BY
-  month;
-""".strip()
-
-
-def _revenue_vendor_driver_sql():
-    return """
-WITH bounds AS (
-  SELECT
-    date(MAX(invoice_date), 'start of month', '-1 month') AS current_start,
-    date(MAX(invoice_date), 'start of month') AS current_end_exclusive,
-    date(MAX(invoice_date), 'start of month', '-2 months') AS previous_start,
-    date(MAX(invoice_date), 'start of month', '-1 month') AS previous_end_exclusive
-  FROM invoices
-),
-vendor_revenue AS (
-  SELECT
-    v.id AS vendor_id,
-    v.name AS vendor_name,
-    ROUND(SUM(CASE
-      WHEN i.status = 'paid'
-       AND i.invoice_date >= b.previous_start
-       AND i.invoice_date < b.previous_end_exclusive
-      THEN COALESCE(i.grand_total, 0)
-      ELSE 0
-    END), 2) AS previous_revenue,
-    ROUND(SUM(CASE
-      WHEN i.status = 'paid'
-       AND i.invoice_date >= b.current_start
-       AND i.invoice_date < b.current_end_exclusive
-      THEN COALESCE(i.grand_total, 0)
-      ELSE 0
-    END), 2) AS current_revenue,
-    SUM(CASE
-      WHEN i.status = 'paid'
-       AND i.invoice_date >= b.previous_start
-       AND i.invoice_date < b.previous_end_exclusive
-      THEN 1
-      ELSE 0
-    END) AS previous_paid_invoice_count,
-    SUM(CASE
-      WHEN i.status = 'paid'
-       AND i.invoice_date >= b.current_start
-       AND i.invoice_date < b.current_end_exclusive
-      THEN 1
-      ELSE 0
-    END) AS current_paid_invoice_count
-  FROM invoices AS i
-  INNER JOIN vendors AS v
-    ON i.vendor_id = v.id
-  CROSS JOIN bounds AS b
-  WHERE i.invoice_date >= b.previous_start
-    AND i.invoice_date < b.current_end_exclusive
-  GROUP BY
-    v.id,
-    v.name
-)
-SELECT
-  vendor_id,
-  vendor_name,
-  previous_revenue,
-  current_revenue,
-  ROUND(current_revenue - previous_revenue, 2) AS revenue_change,
-  previous_paid_invoice_count,
-  current_paid_invoice_count,
-  current_paid_invoice_count - previous_paid_invoice_count AS paid_invoice_count_change
-FROM vendor_revenue
-WHERE ABS(current_revenue - previous_revenue) > 0
-ORDER BY
-  revenue_change ASC
-LIMIT 10;
-""".strip()
-
-
-def _revenue_status_mix_sql():
-    return """
-WITH bounds AS (
-  SELECT
-    date(MAX(invoice_date), 'start of month', '-1 month') AS current_start,
-    date(MAX(invoice_date), 'start of month') AS current_end_exclusive,
-    date(MAX(invoice_date), 'start of month', '-2 months') AS previous_start,
-    date(MAX(invoice_date), 'start of month', '-1 month') AS previous_end_exclusive
-  FROM invoices
-),
-status_periods AS (
-  SELECT
-    CASE
-      WHEN i.invoice_date >= b.previous_start AND i.invoice_date < b.previous_end_exclusive THEN 'previous_period'
-      WHEN i.invoice_date >= b.current_start AND i.invoice_date < b.current_end_exclusive THEN 'current_period'
-    END AS period_key,
-    i.status,
-    COUNT(*) AS invoice_count,
-    ROUND(SUM(COALESCE(i.grand_total, 0)), 2) AS invoice_value
-  FROM invoices AS i
-  CROSS JOIN bounds AS b
-  WHERE i.invoice_date >= b.previous_start
-    AND i.invoice_date < b.current_end_exclusive
-  GROUP BY
-    period_key,
-    i.status
-)
-SELECT
-  period_key,
-  status,
-  invoice_count,
-  invoice_value
-FROM status_periods
-WHERE period_key IS NOT NULL
-ORDER BY
-  period_key,
-  invoice_value DESC;
-""".strip()
+    return build_dataset_analysis_plan(semantic_layer, max_queries=5)
 
 
 def build_revenue_drop_evidence_queries():
-    common_columns = ["invoices.invoice_date", "invoices.status", "invoices.grand_total"]
-    return [
-        EvidenceQuery(
-            name="data_freshness",
-            purpose="Inspect the available invoice date range before interpreting relative periods.",
-            sql=_data_freshness_sql(),
-            tables=["invoices"],
-            columns=["invoices.invoice_date", "invoices.status"],
-        ),
-        EvidenceQuery(
-            name="period_comparison",
-            purpose="Compare revenue for the latest complete invoice month against the prior month.",
-            sql=_revenue_period_comparison_sql(),
-            tables=["invoices"],
-            columns=common_columns,
-            metric="revenue",
-        ),
-        EvidenceQuery(
-            name="monthly_trend",
-            purpose="Check whether the latest complete month is unusual against recent monthly history.",
-            sql=_revenue_monthly_trend_sql(),
-            tables=["invoices"],
-            columns=common_columns,
-            metric="revenue",
-        ),
-        EvidenceQuery(
-            name="vendor_drivers",
-            purpose="Find vendors contributing most to the month-over-month revenue change.",
-            sql=_revenue_vendor_driver_sql(),
-            tables=["invoices", "vendors"],
-            columns=[
-                "invoices.invoice_date",
-                "invoices.status",
-                "invoices.grand_total",
-                "invoices.vendor_id",
-                "vendors.id",
-                "vendors.name",
-            ],
-            metric="revenue",
-        ),
-        EvidenceQuery(
-            name="status_mix",
-            purpose="Check whether invoices moved out of paid status in the comparison month.",
-            sql=_revenue_status_mix_sql(),
-            tables=["invoices"],
-            columns=common_columns,
-            metric="revenue",
-        ),
-    ]
+    """Backward-compatible wrapper; evidence is now semantic-layer driven."""
+    return build_metric_driver_evidence_queries("revenue")
 
 
 def infer_analysis_intent(user_question, semantic_layer):
@@ -472,10 +427,8 @@ def infer_analysis_intent(user_question, semantic_layer):
         "give me insights",
         "business review",
     ]
-    revenue_terms = ["revenue", "paid invoice value", "realized invoice value", "paid bills"]
-    why_terms = ["why", "reason", "driver", "cause", "explain"]
-    drop_terms = ["drop", "decline", "fell", "fall", "decrease", "down"]
-
+    why_terms = ["why", "reason", "driver", "cause", "explain", "root cause"]
+    change_terms = ["drop", "decline", "fell", "fall", "decrease", "down", "increase", "up", "change", "spike"]
     if any(phrase in normalized for phrase in overview_phrases):
         return {
             "mode": "data_overview",
@@ -490,16 +443,15 @@ def infer_analysis_intent(user_question, semantic_layer):
             "reason": "The user is asking for a broad analysis, so plan and run multiple focused evidence questions.",
         }
 
-    if (
-        any(term in normalized for term in revenue_terms)
-        and any(term in normalized for term in why_terms)
-        and any(term in normalized for term in drop_terms)
-    ):
-        return {
-            "mode": "metric_driver_investigation",
-            "metric": "revenue",
-            "reason": "The question asks for drivers behind a revenue decline, which needs comparison and evidence queries.",
-        }
+    if any(term in normalized for term in why_terms) and any(term in normalized for term in change_terms):
+        for metric_name, metric in semantic_layer.get("metrics", {}).items():
+            metric_terms = [metric_name.replace("_", " "), *(metric.get("synonyms") or [])]
+            if any(str(term).lower() in normalized for term in metric_terms if term):
+                return {
+                    "mode": "metric_driver_investigation",
+                    "metric": metric_name,
+                    "reason": "The question asks for drivers behind a metric change, so run semantic-layer driven evidence queries.",
+                }
 
     return {
         "mode": "single_query_analysis",
@@ -530,18 +482,31 @@ def _semantic_table_groups(semantic_layer):
 
 def _example_questions_from_semantic_layer(semantic_layer):
     metrics = semantic_layer.get("metrics", {})
-    examples = [
-        "Which vendors have the highest paid invoice value this year?",
-        "Which invoices are overdue or still unpaid?",
-        "How much spend is outstanding by status?",
-        "Which purchase orders are closed versus still open?",
-        "Which products or receipts have the highest rejection rate?",
-    ]
+    profiles = _semantic_profile(semantic_layer)
+    examples = []
 
     for metric_name, metric in metrics.items():
         description = metric.get("description")
-        if description:
-            examples.append(f"Show {metric_name.replace('_', ' ')}: {description.lower()}.")
+        display_metric = metric_name.replace("_", " ")
+        metric_tables = metric.get("tables") or []
+        if metric_tables:
+            examples.append(f"Show {display_metric} by month if a date field exists.")
+            examples.append(f"Which records have the highest {display_metric}?")
+        elif description:
+            examples.append(f"Show {display_metric}: {description.lower()}.")
+
+    for table_name, profile in profiles.items():
+        table_label = table_name.replace("_", " ")
+        examples.append(f"How many {table_label} records are in the data?")
+        if profile["category_columns"]:
+            category = profile["category_columns"][0].replace("_", " ")
+            examples.append(f"Break down {table_label} by {category}.")
+        if profile["metric_columns"]:
+            metric = profile["metric_columns"][0].replace("_", " ")
+            examples.append(f"What is the total {metric} in {table_label}?")
+        if profile["date_columns"]:
+            date_col = profile["date_columns"][0].replace("_", " ")
+            examples.append(f"Show {table_label} trends by {date_col}.")
 
     return examples[:8]
 
@@ -549,37 +514,24 @@ def _example_questions_from_semantic_layer(semantic_layer):
 def _overview_profile_queries(semantic_layer):
     queries = []
     for table_name in semantic_layer.get("tables", {}):
-        queries.append(
-            EvidenceQuery(
-                name=f"{table_name}_row_count",
-                purpose=f"Count available records in {table_name}.",
-                sql=f"SELECT COUNT(*) AS row_count FROM {table_name};",
-                tables=[table_name],
-                columns=[],
-            )
-        )
+        queries.append(_count_query_for_table(table_name))
 
-    date_profiles = {
-        "invoices": "invoice_date",
-        "purchase_orders": "po_date",
-        "payments": "payment_date",
-        "grns": "grn_date",
-    }
-    for table_name, date_column in date_profiles.items():
-        if table_name not in semantic_layer.get("tables", {}):
-            continue
-        queries.append(
-            EvidenceQuery(
-                name=f"{table_name}_date_range",
-                purpose=f"Find available date coverage for {table_name}.",
-                sql=(
-                    f"SELECT MIN({date_column}) AS min_date, "
-                    f"MAX({date_column}) AS max_date FROM {table_name};"
-                ),
-                tables=[table_name],
-                columns=[f"{table_name}.{date_column}"],
+    profiles = _semantic_profile(semantic_layer)
+    for table_name, profile in profiles.items():
+        for date_column in profile["date_columns"][:2]:
+            queries.append(
+                EvidenceQuery(
+                    name=f"{_safe_alias(table_name)}_{_safe_alias(date_column)}_range",
+                    purpose=f"Find available date coverage for {table_name}.",
+                    sql=(
+                        f"SELECT MIN({_quote_identifier(date_column)}) AS min_date, "
+                        f"MAX({_quote_identifier(date_column)}) AS max_date "
+                        f"FROM {_quote_identifier(table_name)};"
+                    ),
+                    tables=[table_name],
+                    columns=[f"{table_name}.{date_column}"],
+                )
             )
-        )
     return queries
 
 
@@ -593,10 +545,17 @@ def _build_data_overview_analysis(user_question, evidence_items, semantic_layer)
             continue
         if item["name"].endswith("_row_count"):
             table_name = item["name"][: -len("_row_count")]
-            row_counts[table_name] = rows[0].get("row_count")
-        elif item["name"].endswith("_date_range"):
-            table_name = item["name"][: -len("_date_range")]
-            date_ranges[table_name] = rows[0]
+            matched_table = next(
+                (
+                    table["table"]
+                    for table in table_groups
+                    if _safe_alias(table["table"]) == table_name
+                ),
+                table_name,
+            )
+            row_counts[matched_table] = rows[0].get("row_count")
+        elif item["name"].endswith("_range"):
+            date_ranges[item["name"]] = rows[0]
 
     top_tables = [
         f"{table['table']} ({row_counts.get(table['table'], 'unknown')} rows): {table.get('description')}"
@@ -605,14 +564,15 @@ def _build_data_overview_analysis(user_question, evidence_items, semantic_layer)
     metric_names = list(semantic_layer.get("metrics", {}).keys())
     examples = _example_questions_from_semantic_layer(semantic_layer)
 
+    table_count = len(table_groups)
+    metric_count = len(metric_names)
     answer = (
-        "You can ask about accounts-payable operations: vendors, invoices, payments, "
-        "purchase orders, goods receipts, departments, companies, products, approval rules, "
-        "spend, liability, paid invoice value, invoice status, fulfillment, and rejection rate. "
-        "I can also run a broader review by planning several focused questions and checking the data behind each one."
+        f"This dataset has {table_count} table(s) and {metric_count} semantic metric(s). "
+        "You can ask for counts, breakdowns, trends, rankings, joins, and broader reviews "
+        "using the entities and metrics discovered from the active database."
     )
 
-    return {
+    analysis = {
         "Analysis_Version": "ai_native_analysis_v1",
         "Mode": "data_overview",
         "Question": user_question,
@@ -657,163 +617,247 @@ def _build_data_overview_analysis(user_question, evidence_items, semantic_layer)
             "reasons": ["The overview uses semantic metadata and direct database profile queries."],
         },
         "Limitations": [
-            "The overview explains available AP data; it does not infer business context outside the database."
+            "The overview explains the active database from schema metadata and sample values; it does not infer facts outside the uploaded data."
         ],
         "Suggested_Next_Queries": examples,
         "Suggested_Next_Query_Evidence": [],
         "SQL_Is_Supporting_Evidence": True,
     }
+    return _augment_confidence_reasons(analysis, semantic_layer)
 
 
-def build_dataset_analysis_plan():
-    return [
-        EvidenceQuery(
-            name="invoice_status_liability",
-            purpose="Quantify invoice workload and value by status.",
-            sql="""
-SELECT
-  status,
-  COUNT(*) AS invoice_count,
-  ROUND(SUM(COALESCE(grand_total, 0)), 2) AS invoice_value
-FROM invoices
-GROUP BY status
-ORDER BY invoice_value DESC;
-""".strip(),
-            tables=["invoices"],
-            columns=["invoices.status", "invoices.grand_total"],
-            metric="total_liability",
-        ),
-        EvidenceQuery(
-            name="monthly_paid_invoice_value",
-            purpose="Review the paid invoice value trend by month.",
-            sql="""
-SELECT
-  strftime('%Y-%m', invoice_date) AS month,
-  ROUND(SUM(CASE WHEN status = 'paid' THEN COALESCE(grand_total, 0) ELSE 0 END), 2) AS paid_invoice_value,
-  SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END) AS paid_invoice_count
-FROM invoices
-GROUP BY strftime('%Y-%m', invoice_date)
-ORDER BY month;
-""".strip(),
-            tables=["invoices"],
-            columns=["invoices.invoice_date", "invoices.status", "invoices.grand_total"],
-            metric="revenue",
-        ),
-        EvidenceQuery(
-            name="top_vendors_by_paid_value",
-            purpose="Find vendors with the largest paid invoice value.",
-            sql="""
-SELECT
-  v.id AS vendor_id,
-  v.name AS vendor_name,
-  ROUND(SUM(CASE WHEN i.status = 'paid' THEN COALESCE(i.grand_total, 0) ELSE 0 END), 2) AS paid_invoice_value,
-  SUM(CASE WHEN i.status = 'paid' THEN 1 ELSE 0 END) AS paid_invoice_count
-FROM invoices AS i
-INNER JOIN vendors AS v ON i.vendor_id = v.id
-GROUP BY v.id, v.name
-ORDER BY paid_invoice_value DESC
-LIMIT 10;
-""".strip(),
-            tables=["invoices", "vendors"],
-            columns=["invoices.vendor_id", "invoices.status", "invoices.grand_total", "vendors.name"],
-            metric="revenue",
-        ),
-        EvidenceQuery(
-            name="purchase_order_fulfillment",
-            purpose="Summarize purchase order status and value.",
-            sql="""
-SELECT
-  status,
-  COUNT(*) AS purchase_order_count,
-  ROUND(SUM(COALESCE(total_amount, 0)), 2) AS purchase_order_value
-FROM purchase_orders
-GROUP BY status
-ORDER BY purchase_order_value DESC;
-""".strip(),
-            tables=["purchase_orders"],
-            columns=["purchase_orders.status", "purchase_orders.total_amount"],
-            metric="order_fulfillment_count",
-        ),
-        EvidenceQuery(
-            name="goods_rejection_rate",
-            purpose="Measure rejected received quantity by product.",
-            sql="""
-SELECT
-  p.id AS product_id,
-  p.name AS product_name,
-  ROUND(SUM(COALESCE(gli.quantity_rejected, 0)), 2) AS rejected_quantity,
-  ROUND(SUM(COALESCE(gli.quantity_received, 0)), 2) AS received_quantity,
-  ROUND(
-    SUM(COALESCE(gli.quantity_rejected, 0)) * 100.0 /
-    NULLIF(SUM(COALESCE(gli.quantity_received, 0) + COALESCE(gli.quantity_rejected, 0)), 0),
-    2
-  ) AS rejection_rate
-FROM grn_line_items AS gli
-INNER JOIN products AS p ON gli.product_id = p.id
-GROUP BY p.id, p.name
-HAVING rejected_quantity > 0
-ORDER BY rejection_rate DESC, rejected_quantity DESC
-LIMIT 10;
-""".strip(),
-            tables=["grn_line_items", "products"],
-            columns=[
-                "grn_line_items.quantity_rejected",
-                "grn_line_items.quantity_received",
-                "products.name",
-            ],
-            metric="rejection_rate",
-        ),
+def _metric_name_for_table_column(semantic_layer, table_name, column_name):
+    for metric_name, metric in semantic_layer.get("metrics", {}).items():
+        metric_tables = metric.get("tables") or []
+        metric_sql = str(metric.get("sql") or "").lower()
+        if table_name in metric_tables and column_name.lower() in metric_sql:
+            return metric_name
+    return None
+
+
+def _category_breakdown_query(table_name, category_column, metric_column=None, semantic_layer=None):
+    category_alias = _safe_alias(category_column)
+    table_alias = "t"
+    select_parts = [
+        f"{_sql_col(category_column, table_alias)} AS {_quote_identifier(category_alias)}",
+        "COUNT(*) AS row_count",
     ]
+    order_by = "row_count"
+    columns = [f"{table_name}.{category_column}"]
+    metric_name = None
+    if metric_column:
+        metric_alias = f"total_{_safe_alias(metric_column)}"
+        select_parts.append(
+            f"ROUND(SUM(COALESCE({_sql_col(metric_column, table_alias)}, 0)), 2) AS {_quote_identifier(metric_alias)}"
+        )
+        order_by = _quote_identifier(metric_alias)
+        columns.append(f"{table_name}.{metric_column}")
+        if semantic_layer:
+            metric_name = _metric_name_for_table_column(semantic_layer, table_name, metric_column)
+
+    select_sql = ",\n  ".join(select_parts)
+    sql = f"""
+SELECT
+  {select_sql}
+FROM {_sql_table(table_name, table_alias)}
+GROUP BY {_sql_col(category_column, table_alias)}
+ORDER BY {order_by} DESC
+LIMIT 20;
+""".strip()
+    return EvidenceQuery(
+        name=f"{_safe_alias(table_name)}_by_{_safe_alias(category_column)}",
+        purpose=f"Break down {table_name} by {category_column}.",
+        sql=sql,
+        tables=[table_name],
+        columns=columns,
+        metric=metric_name,
+    )
+
+
+def _monthly_trend_query(table_name, date_column, metric_column=None, semantic_layer=None):
+    table_alias = "t"
+    select_parts = [
+        f"strftime('%Y-%m', {_sql_col(date_column, table_alias)}) AS month",
+        "COUNT(*) AS row_count",
+    ]
+    order_by = "month"
+    columns = [f"{table_name}.{date_column}"]
+    metric_name = None
+    if metric_column:
+        metric_alias = f"total_{_safe_alias(metric_column)}"
+        select_parts.append(
+            f"ROUND(SUM(COALESCE({_sql_col(metric_column, table_alias)}, 0)), 2) AS {_quote_identifier(metric_alias)}"
+        )
+        columns.append(f"{table_name}.{metric_column}")
+        if semantic_layer:
+            metric_name = _metric_name_for_table_column(semantic_layer, table_name, metric_column)
+
+    select_sql = ",\n  ".join(select_parts)
+    sql = f"""
+SELECT
+  {select_sql}
+FROM {_sql_table(table_name, table_alias)}
+WHERE {_sql_col(date_column, table_alias)} IS NOT NULL
+GROUP BY strftime('%Y-%m', {_sql_col(date_column, table_alias)})
+ORDER BY {order_by}
+LIMIT 36;
+""".strip()
+    return EvidenceQuery(
+        name=f"{_safe_alias(table_name)}_{_safe_alias(date_column)}_monthly_trend",
+        purpose=f"Review the monthly trend for {table_name} using {date_column}.",
+        sql=sql,
+        tables=[table_name],
+        columns=columns,
+        metric=metric_name,
+    )
+
+
+def _numeric_summary_query(table_name, metric_column, semantic_layer=None):
+    table_alias = "t"
+    metric_alias = _safe_alias(metric_column)
+    sql = f"""
+SELECT
+  COUNT(*) AS row_count,
+  ROUND(SUM(COALESCE({_sql_col(metric_column, table_alias)}, 0)), 2) AS total_{metric_alias},
+  ROUND(AVG({_sql_col(metric_column, table_alias)}), 2) AS avg_{metric_alias},
+  MIN({_sql_col(metric_column, table_alias)}) AS min_{metric_alias},
+  MAX({_sql_col(metric_column, table_alias)}) AS max_{metric_alias}
+FROM {_sql_table(table_name, table_alias)};
+""".strip()
+    return EvidenceQuery(
+        name=f"{_safe_alias(table_name)}_{metric_alias}_summary",
+        purpose=f"Summarize {metric_column} in {table_name}.",
+        sql=sql,
+        tables=[table_name],
+        columns=[f"{table_name}.{metric_column}"],
+        metric=_metric_name_for_table_column(semantic_layer or {}, table_name, metric_column),
+    )
+
+
+def _relationship_breakdown_query(semantic_layer, profiles):
+    for left_table, left_profile in _ordered_profiles_for_analysis(semantic_layer, profiles):
+        table_info = semantic_layer.get("tables", {}).get(left_table, {})
+        metric_column = next(iter(left_profile.get("metric_columns") or []), None)
+        if not metric_column:
+            continue
+        for relationship in table_info.get("relationships") or []:
+            right_table = relationship.get("target_table")
+            right_profile = profiles.get(right_table, {})
+            display_column = next(iter(right_profile.get("display_columns") or []), None)
+            join_condition = relationship.get("join_condition")
+            if not right_table or not display_column or not join_condition:
+                continue
+            sql = f"""
+SELECT
+  r.{_quote_identifier(display_column)} AS {_quote_identifier(_safe_alias(display_column))},
+  COUNT(*) AS row_count,
+  ROUND(SUM(COALESCE(l.{_quote_identifier(metric_column)}, 0)), 2) AS total_{_safe_alias(metric_column)}
+FROM {_sql_table(left_table, "l")}
+INNER JOIN {_sql_table(right_table, "r")}
+  ON {join_condition.replace(left_table + ".", "l.").replace(right_table + ".", "r.")}
+GROUP BY r.{_quote_identifier(display_column)}
+ORDER BY total_{_safe_alias(metric_column)} DESC
+LIMIT 20;
+""".strip()
+            return EvidenceQuery(
+                name=f"{_safe_alias(left_table)}_by_{_safe_alias(right_table)}",
+                purpose=f"Find how {left_table} metric values break down by {right_table}.",
+                sql=sql,
+                tables=[left_table, right_table],
+                columns=[
+                    f"{left_table}.{metric_column}",
+                    f"{right_table}.{display_column}",
+                ],
+                metric=_metric_name_for_table_column(semantic_layer, left_table, metric_column),
+            )
+    return None
+
+
+def build_dataset_analysis_plan(semantic_layer=None, max_queries=6):
+    if semantic_layer is None:
+        semantic_layer = load_json(str(SEMANTIC_LAYER_PATH))
+
+    profiles = _semantic_profile(semantic_layer)
+    queries = []
+
+    if semantic_layer.get("tables"):
+        table_count_selects = [
+            f"SELECT '{table_name.replace(chr(39), chr(39) * 2)}' AS table_name, COUNT(*) AS row_count FROM {_quote_identifier(table_name)}"
+            for table_name in semantic_layer.get("tables", {})
+        ]
+        queries.append(
+            EvidenceQuery(
+                name="dataset_row_counts",
+                purpose="Compare row counts across all discovered tables.",
+                sql="\nUNION ALL\n".join(table_count_selects) + "\nORDER BY row_count DESC;",
+                tables=list(semantic_layer.get("tables", {}).keys()),
+                columns=[],
+            )
+        )
+
+    relationship_query = _relationship_breakdown_query(semantic_layer, profiles)
+    if relationship_query:
+        queries.append(relationship_query)
+
+    for table_name, profile in _ordered_profiles_for_analysis(semantic_layer, profiles):
+        if len(queries) >= max_queries:
+            break
+        metric_column = next(iter(profile["metric_columns"]), None)
+        if profile["category_columns"]:
+            queries.append(
+                _category_breakdown_query(
+                    table_name,
+                    profile["category_columns"][0],
+                    metric_column,
+                    semantic_layer,
+                )
+            )
+            continue
+        if profile["date_columns"]:
+            queries.append(
+                _monthly_trend_query(
+                    table_name,
+                    profile["date_columns"][0],
+                    metric_column,
+                    semantic_layer,
+                )
+            )
+            continue
+        if metric_column:
+            queries.append(_numeric_summary_query(table_name, metric_column, semantic_layer))
+            continue
+        queries.append(_count_query_for_table(table_name))
+
+    return queries[:max_queries]
 
 
 def _planned_analysis_answer(evidence_items):
-    status_rows = _rows(_evidence_by_name(evidence_items, "invoice_status_liability"))
-    vendor_rows = _rows(_evidence_by_name(evidence_items, "top_vendors_by_paid_value"))
-    po_rows = _rows(_evidence_by_name(evidence_items, "purchase_order_fulfillment"))
-    rejection_rows = _rows(_evidence_by_name(evidence_items, "goods_rejection_rate"))
-    monthly_rows = _rows(_evidence_by_name(evidence_items, "monthly_paid_invoice_value"))
-
-    largest_status = max(
-        status_rows,
-        key=lambda row: _safe_float(row.get("invoice_value")),
-        default={},
-    )
-    top_vendor = vendor_rows[0] if vendor_rows else {}
-    latest_month = monthly_rows[-1] if monthly_rows else {}
-    largest_po_status = max(
-        po_rows,
-        key=lambda row: _safe_float(row.get("purchase_order_value")),
-        default={},
-    )
-    top_rejection = rejection_rows[0] if rejection_rows else {}
-
     parts = []
-    if largest_status:
-        parts.append(
-            f"The largest invoice status bucket is {largest_status.get('status')} "
-            f"at {_format_money(largest_status.get('invoice_value'))} across "
-            f"{largest_status.get('invoice_count')} invoice(s)."
-        )
-    if latest_month:
-        parts.append(
-            f"The latest invoice month in the trend is {latest_month.get('month')} with "
-            f"{_format_money(latest_month.get('paid_invoice_value'))} paid invoice value."
-        )
-    if top_vendor:
-        parts.append(
-            f"The top paid-value vendor is {top_vendor.get('vendor_name')} at "
-            f"{_format_money(top_vendor.get('paid_invoice_value'))}."
-        )
-    if largest_po_status:
-        parts.append(
-            f"Purchase order value is most concentrated in {largest_po_status.get('status')} "
-            f"orders at {_format_money(largest_po_status.get('purchase_order_value'))}."
-        )
-    if top_rejection:
-        parts.append(
-            f"The highest product rejection signal is {top_rejection.get('product_name')} "
-            f"with {_format_percent(top_rejection.get('rejection_rate'))} rejected quantity."
-        )
+    for item in evidence_items:
+        if item.get("status") != "ok":
+            continue
+        rows = _rows(item)
+        if not rows:
+            continue
+        if item.get("name") == "dataset_row_counts":
+            top = rows[0]
+            parts.append(
+                f"The largest table by row count is {top.get('table_name')} with {top.get('row_count')} row(s)."
+            )
+            continue
+        row = rows[-1] if "trend" in item.get("name", "") else rows[0]
+        numeric_fields = [
+            key for key, value in row.items()
+            if key != "row_count" and isinstance(value, (int, float))
+        ]
+        label_fields = [key for key in row if key not in numeric_fields and key != "row_count"]
+        if numeric_fields and label_fields:
+            parts.append(
+                f"{item.get('purpose')} Leading result: {label_fields[0]}={row.get(label_fields[0])}, "
+                f"{numeric_fields[0]}={row.get(numeric_fields[0])}."
+            )
+        elif "row_count" in row:
+            parts.append(f"{item.get('purpose')} Returned {row.get('row_count')} row(s).")
 
     if not parts:
         return "I planned a broad dataset review, but the evidence queries did not return enough rows to summarize."
@@ -824,30 +868,11 @@ def _planned_analysis_answer(evidence_items):
 def _build_planned_dataset_analysis(user_question, evidence_items, semantic_layer):
     plan_questions = [
         {
-            "question": "What is the invoice value and count by status?",
-            "evidence": "invoice_status_liability",
-            "why": "Starts with operational exposure and outstanding workload.",
-        },
-        {
-            "question": "How is paid invoice value trending by month?",
-            "evidence": "monthly_paid_invoice_value",
-            "why": "Shows whether paid value is rising, falling, or volatile over time.",
-        },
-        {
-            "question": "Which vendors contribute the most paid invoice value?",
-            "evidence": "top_vendors_by_paid_value",
-            "why": "Identifies concentration and vendor-level drivers.",
-        },
-        {
-            "question": "How are purchase orders distributed by status?",
-            "evidence": "purchase_order_fulfillment",
-            "why": "Checks procurement execution and open order value.",
-        },
-        {
-            "question": "Which products have the highest receipt rejection rate?",
-            "evidence": "goods_rejection_rate",
-            "why": "Surfaces quality or receiving issues.",
-        },
+            "question": item.get("purpose"),
+            "evidence": item.get("name"),
+            "why": "This evidence query was selected from the active semantic layer.",
+        }
+        for item in evidence_items
     ]
     failed = [item for item in evidence_items if item.get("status") != "ok"]
     cited_tables, cited_columns = _table_column_citations(
@@ -857,21 +882,21 @@ def _build_planned_dataset_analysis(user_question, evidence_items, semantic_laye
     )
     metric_defs = [
         _metric_definition(semantic_layer, metric)
-        for metric in ["total_liability", "revenue", "order_fulfillment_count", "rejection_rate"]
+        for metric in sorted({item.get("metric") for item in evidence_items if item.get("metric")})
         if _metric_definition(semantic_layer, metric)
     ]
     confidence_score = 0.86 - min(0.4, len(failed) * 0.12)
 
-    return {
+    analysis = {
         "Analysis_Version": "ai_native_analysis_v1",
         "Mode": "planned_dataset_analysis",
         "Question": user_question,
-        "Resolved_Question": "Broad AP dataset analysis",
+        "Resolved_Question": "Broad dataset analysis",
         "Executive_Answer": _planned_analysis_answer(evidence_items),
         "Clarification": {"needed": False, "question": None, "decision": None},
         "Assumptions": [
             "A broad analysis should be decomposed into focused, answerable business questions.",
-            "The first-pass plan covers invoice exposure, paid-value trend, vendor concentration, purchase-order status, and receipt quality.",
+            "The first-pass plan is generated from tables, metrics, relationships, date columns, and categorical columns in the semantic layer.",
             "Each planned question is backed by its own read-only SQL evidence query.",
         ],
         "Definitions": metric_defs,
@@ -894,17 +919,13 @@ def _build_planned_dataset_analysis(user_question, evidence_items, semantic_laye
         },
         "Limitations": [
             "This is an initial broad review; deeper root-cause analysis should follow the strongest signals.",
-            "The plan is constrained to the AP tables and metrics present in the semantic layer.",
+            "The plan is constrained to tables and metrics present in the active semantic layer.",
         ],
-        "Suggested_Next_Queries": [
-            "Explain the largest unpaid or pending invoice status bucket by vendor.",
-            "Investigate month-over-month changes in paid invoice value for the top vendors.",
-            "List high-value open purchase orders and their requesting departments.",
-            "Show receipt rejection details for the products with the highest rejection rate.",
-        ],
+        "Suggested_Next_Queries": _example_questions_from_semantic_layer(semantic_layer)[:4],
         "Suggested_Next_Query_Evidence": [],
         "SQL_Is_Supporting_Evidence": True,
     }
+    return _augment_confidence_reasons(analysis, semantic_layer)
 
 
 def _evidence_by_name(evidence_items, name):
@@ -920,148 +941,6 @@ def _rows(item):
     return item.get("result_preview") or []
 
 
-def _period_comparison_from_evidence(evidence_items):
-    period_rows = _rows(_evidence_by_name(evidence_items, "period_comparison"))
-    previous_row = next((row for row in period_rows if row.get("period_key") == "previous_period"), None)
-    current_row = next((row for row in period_rows if row.get("period_key") == "current_period"), None)
-
-    if not previous_row or not current_row:
-        return {
-            "status": "unavailable",
-            "reason": "The period comparison query did not return both current and previous periods.",
-        }
-
-    previous_revenue = _safe_float(previous_row.get("revenue"))
-    current_revenue = _safe_float(current_row.get("revenue"))
-    absolute_change = current_revenue - previous_revenue
-    percent_change = _safe_percent_change(current_revenue, previous_revenue)
-
-    if absolute_change < 0:
-        direction = "down"
-    elif absolute_change > 0:
-        direction = "up"
-    else:
-        direction = "flat"
-
-    return {
-        "status": "ok",
-        "metric": "revenue",
-        "unit": "INR",
-        "current_period": {
-            "label": str(current_row.get("period_start"))[:7],
-            "start": current_row.get("period_start"),
-            "end": current_row.get("period_end"),
-            "value": _round_number(current_revenue),
-            "paid_invoice_count": current_row.get("paid_invoice_count"),
-            "average_paid_invoice_value": current_row.get("average_paid_invoice_value"),
-        },
-        "previous_period": {
-            "label": str(previous_row.get("period_start"))[:7],
-            "start": previous_row.get("period_start"),
-            "end": previous_row.get("period_end"),
-            "value": _round_number(previous_revenue),
-            "paid_invoice_count": previous_row.get("paid_invoice_count"),
-            "average_paid_invoice_value": previous_row.get("average_paid_invoice_value"),
-        },
-        "absolute_change": _round_number(absolute_change),
-        "percent_change": _round_number(percent_change),
-        "direction": direction,
-        "data_max_invoice_date": current_row.get("data_max_invoice_date") or previous_row.get("data_max_invoice_date"),
-    }
-
-
-def _anomalies_from_evidence(evidence_items, period_comparison):
-    anomalies = []
-    trend_rows = _rows(_evidence_by_name(evidence_items, "monthly_trend"))
-
-    if period_comparison.get("status") != "ok":
-        return [
-            {
-                "severity": "warning",
-                "message": "Could not evaluate anomalies because the comparison period was unavailable.",
-            }
-        ]
-
-    current_label = period_comparison["current_period"]["label"]
-    current_value = _safe_float(period_comparison["current_period"]["value"])
-    baseline_values = [
-        _safe_float(row.get("revenue"))
-        for row in trend_rows
-        if row.get("month") != current_label and row.get("revenue") is not None
-    ]
-
-    if len(baseline_values) < 3:
-        anomalies.append(
-            {
-                "severity": "info",
-                "message": "Recent history has fewer than three baseline months, so statistical anomaly confidence is limited.",
-            }
-        )
-        return anomalies
-
-    baseline_mean = sum(baseline_values) / len(baseline_values)
-    variance = sum((value - baseline_mean) ** 2 for value in baseline_values) / len(baseline_values)
-    baseline_stddev = math.sqrt(variance)
-    z_score = None if baseline_stddev == 0 else (current_value - baseline_mean) / baseline_stddev
-
-    if z_score is None:
-        anomalies.append(
-            {
-                "severity": "info",
-                "message": "Historical monthly revenue had no variance, so a z-score anomaly test was not meaningful.",
-                "baseline_mean": _round_number(baseline_mean),
-            }
-        )
-    elif z_score <= -1.5:
-        anomalies.append(
-            {
-                "severity": "high" if z_score <= -2.0 else "medium",
-                "message": "The current period revenue is materially below the recent monthly baseline.",
-                "z_score": _round_number(z_score),
-                "baseline_mean": _round_number(baseline_mean),
-                "baseline_stddev": _round_number(baseline_stddev),
-            }
-        )
-    else:
-        anomalies.append(
-            {
-                "severity": "info",
-                "message": "The current period does not cross the configured revenue anomaly threshold.",
-                "z_score": _round_number(z_score),
-                "baseline_mean": _round_number(baseline_mean),
-                "baseline_stddev": _round_number(baseline_stddev),
-            }
-        )
-
-    if period_comparison.get("direction") != "down":
-        anomalies.append(
-            {
-                "severity": "info",
-                "message": "The data did not confirm a revenue drop for the analyzed periods.",
-            }
-        )
-
-    return anomalies
-
-
-def _top_drivers_from_evidence(evidence_items):
-    driver_rows = _rows(_evidence_by_name(evidence_items, "vendor_drivers"))
-    negative_drivers = [
-        row for row in driver_rows
-        if _safe_float(row.get("revenue_change")) < 0
-    ]
-    negative_drivers.sort(key=lambda row: _safe_float(row.get("revenue_change")))
-    return negative_drivers[:5]
-
-
-def _status_rows_for_period(evidence_items, period_key):
-    rows = _rows(_evidence_by_name(evidence_items, "status_mix"))
-    return [
-        row for row in rows
-        if row.get("period_key") == period_key
-    ]
-
-
 def _question_with_evidence(*, question, why, evidence_name, supporting_facts, tables, columns):
     return {
         "question": question,
@@ -1071,161 +950,6 @@ def _question_with_evidence(*, question, why, evidence_name, supporting_facts, t
         "tables": tables,
         "columns": columns,
     }
-
-
-def _data_backed_next_questions_for_revenue_drop(evidence_items, period_comparison):
-    if period_comparison.get("status") != "ok":
-        return []
-
-    suggestions = []
-    current = period_comparison["current_period"]
-    previous = period_comparison["previous_period"]
-    current_label = current["label"]
-    previous_label = previous["label"]
-    drivers = _top_drivers_from_evidence(evidence_items)
-
-    for row in drivers[:2]:
-        vendor_name = row.get("vendor_name")
-        if not vendor_name:
-            continue
-
-        suggestions.append(
-            _question_with_evidence(
-                question=(
-                    f"Show paid invoices for {vendor_name} in {previous_label} and {current_label} "
-                    "to verify the vendor-level revenue change."
-                ),
-                why=(
-                    f"`vendor_drivers` shows {vendor_name} changed by "
-                    f"{_format_money(row.get('revenue_change'))}."
-                ),
-                evidence_name="vendor_drivers",
-                supporting_facts={
-                    "vendor_id": row.get("vendor_id"),
-                    "vendor_name": vendor_name,
-                    "previous_revenue": row.get("previous_revenue"),
-                    "current_revenue": row.get("current_revenue"),
-                    "revenue_change": row.get("revenue_change"),
-                    "previous_paid_invoice_count": row.get("previous_paid_invoice_count"),
-                    "current_paid_invoice_count": row.get("current_paid_invoice_count"),
-                },
-                tables=["invoices", "vendors"],
-                columns=[
-                    "invoices.vendor_id",
-                    "invoices.invoice_date",
-                    "invoices.status",
-                    "invoices.grand_total",
-                    "vendors.name",
-                ],
-            )
-        )
-
-    current_status_rows = _status_rows_for_period(evidence_items, "current_period")
-    excluded_status_rows = [
-        row for row in current_status_rows
-        if row.get("status") != "paid" and _safe_float(row.get("invoice_value")) > 0
-    ]
-    excluded_status_rows.sort(key=lambda row: _safe_float(row.get("invoice_value")), reverse=True)
-
-    for row in excluded_status_rows[:2]:
-        status = row.get("status")
-        suggestions.append(
-            _question_with_evidence(
-                question=(
-                    f"List {status} invoices in {current_label} to see which invoice value is "
-                    "excluded from paid-invoice revenue."
-                ),
-                why=(
-                    f"`status_mix` shows {row.get('invoice_count')} {status} invoice(s) worth "
-                    f"{_format_money(row.get('invoice_value'))} in {current_label}."
-                ),
-                evidence_name="status_mix",
-                supporting_facts={
-                    "period_key": row.get("period_key"),
-                    "period": current_label,
-                    "status": status,
-                    "invoice_count": row.get("invoice_count"),
-                    "invoice_value": row.get("invoice_value"),
-                },
-                tables=["invoices"],
-                columns=["invoices.invoice_date", "invoices.status", "invoices.grand_total"],
-            )
-        )
-
-    if current.get("paid_invoice_count") is not None and previous.get("paid_invoice_count") is not None:
-        suggestions.append(
-            _question_with_evidence(
-                question=(
-                    f"List the paid invoices in {current_label} and {previous_label} to inspect "
-                    "the exact transaction mix behind the revenue change."
-                ),
-                why=(
-                    "`period_comparison` shows paid invoice count changed from "
-                    f"{previous.get('paid_invoice_count')} to {current.get('paid_invoice_count')}."
-                ),
-                evidence_name="period_comparison",
-                supporting_facts={
-                    "previous_period": previous_label,
-                    "current_period": current_label,
-                    "previous_paid_invoice_count": previous.get("paid_invoice_count"),
-                    "current_paid_invoice_count": current.get("paid_invoice_count"),
-                    "previous_average_paid_invoice_value": previous.get("average_paid_invoice_value"),
-                    "current_average_paid_invoice_value": current.get("average_paid_invoice_value"),
-                },
-                tables=["invoices"],
-                columns=["invoices.invoice_date", "invoices.status", "invoices.grand_total"],
-            )
-        )
-
-    return suggestions[:5]
-
-
-def _revenue_drop_answer(period_comparison, evidence_items):
-    if period_comparison.get("status") != "ok":
-        return "I could not confirm whether revenue dropped because the period comparison did not return enough data."
-
-    current = period_comparison["current_period"]
-    previous = period_comparison["previous_period"]
-    absolute_change = period_comparison["absolute_change"]
-    percent_change = period_comparison["percent_change"]
-    drivers = _top_drivers_from_evidence(evidence_items)
-
-    if period_comparison["direction"] == "down":
-        opening = (
-            f"Revenue dropped from {_format_money(previous['value'])} in {previous['label']} "
-            f"to {_format_money(current['value'])} in {current['label']} "
-            f"({_format_money(absolute_change)}, {_format_percent(percent_change)})."
-        )
-    elif period_comparison["direction"] == "up":
-        opening = (
-            f"The available data does not show a drop: revenue increased from "
-            f"{_format_money(previous['value'])} in {previous['label']} to "
-            f"{_format_money(current['value'])} in {current['label']} "
-            f"({_format_money(absolute_change)}, {_format_percent(percent_change)})."
-        )
-    else:
-        opening = (
-            f"Revenue was flat at {_format_money(current['value'])} in {current['label']} "
-            f"versus {previous['label']}."
-        )
-
-    volume_detail = (
-        f"Paid invoice count moved from {previous.get('paid_invoice_count')} to "
-        f"{current.get('paid_invoice_count')}, and average paid invoice value moved from "
-        f"{_format_money(previous.get('average_paid_invoice_value'))} to "
-        f"{_format_money(current.get('average_paid_invoice_value'))}."
-    )
-
-    if drivers:
-        driver_bits = [
-            f"{row.get('vendor_name')} ({_format_money(row.get('revenue_change'))})"
-            for row in drivers[:3]
-        ]
-        driver_detail = "Largest negative vendor-level contributors: " + "; ".join(driver_bits) + "."
-    else:
-        driver_detail = "No negative vendor-level contributors were found in the driver query."
-
-    return f"{opening} {volume_detail} {driver_detail}"
 
 
 def _confidence_for_analysis(evidence_items, period_comparison, limitations):
@@ -1274,85 +998,224 @@ def _confidence_for_analysis(evidence_items, period_comparison, limitations):
     }
 
 
-def _build_revenue_drop_analysis(user_question, sql_output, evidence_items, semantic_layer):
-    metric = _metric_definition(semantic_layer, "revenue")
-    period_comparison = _period_comparison_from_evidence(evidence_items)
-    anomalies = _anomalies_from_evidence(evidence_items, period_comparison)
-    cited_tables, cited_columns = _table_column_citations(
-        semantic_layer,
-        ["invoices", "vendors"],
-        [
-            "invoices.invoice_date",
-            "invoices.status",
-            "invoices.grand_total",
-            "invoices.vendor_id",
-            "vendors.id",
-            "vendors.name",
-        ],
-    )
+def _confidence_level(score):
+    if score >= 0.8:
+        return "high"
+    if score >= 0.55:
+        return "medium"
+    return "low"
 
-    data_max_invoice_date = period_comparison.get("data_max_invoice_date")
-    assumptions = [
-        "Revenue means total value of paid invoices, using SUM(invoices.grand_total) where invoices.status = 'paid'.",
-        "Date bucketing uses invoices.invoice_date because the revenue metric is defined on invoices.",
-        (
-            "For 'last month', the analysis uses the latest complete invoice month in the available data "
-            "instead of the machine calendar month, so incomplete data is not treated as a business drop."
-        ),
-        "No breakdown dimension was provided, so the first-pass investigation checks vendor drivers, status mix, and recent monthly trend.",
+
+def _unique_preserving_order(values):
+    seen = set()
+    unique = []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            unique.append(value)
+    return unique
+
+
+def _analysis_tables(analysis, sql_output=None):
+    tables = []
+    for item in analysis.get("Evidence") or []:
+        tables.extend(item.get("tables") or [])
+
+    citations = analysis.get("Citations") or {}
+    tables.extend(item.get("table") for item in citations.get("tables") or [])
+
+    if sql_output:
+        tables.extend(sql_output.get("Selected_Tables") or [])
+
+    return _unique_preserving_order(tables)
+
+
+def _analysis_metrics(analysis, sql_output=None):
+    metrics = []
+    for definition in analysis.get("Definitions") or []:
+        metrics.append(definition.get("metric"))
+
+    for item in analysis.get("Evidence") or []:
+        metrics.append(item.get("metric"))
+
+    if sql_output:
+        metrics.extend(sql_output.get("Selected_Metrics") or [])
+
+    return _unique_preserving_order(metrics)
+
+
+def _has_reviewed_join(analysis):
+    for item in analysis.get("Evidence") or []:
+        sql = item.get("sql") or ""
+        if len(item.get("tables") or []) > 1:
+            return True
+        if re.search(r"\bJOIN\b", sql, flags=re.IGNORECASE):
+            return True
+    return False
+
+
+def _date_range_was_inferred(analysis, sql_output=None):
+    text_parts = []
+    text_parts.extend(analysis.get("Assumptions") or [])
+    if sql_output and sql_output.get("Assumptions"):
+        text_parts.append(sql_output.get("Assumptions"))
+
+    joined = " ".join(str(part).lower() for part in text_parts)
+    date_signals = [
+        "latest complete",
+        "latest invoice date",
+        "treated as incomplete",
+        "last month",
+        "date bucketing",
+        "available data",
+        "inferred",
     ]
-    if data_max_invoice_date:
-        assumptions.append(
-            f"The latest invoice date found was {data_max_invoice_date}; the month containing that date is treated as incomplete."
+    return any(signal in joined for signal in date_signals)
+
+
+def _add_reason(reason_codes, code, message):
+    if any(reason["code"] == code for reason in reason_codes):
+        return
+    reason_codes.append({"code": code, "message": message})
+
+
+def _augment_confidence_reasons(analysis, semantic_layer=None, sql_output=None):
+    confidence = dict(analysis.get("Confidence") or {})
+    score = confidence.get("score")
+    try:
+        score = float(score)
+    except (TypeError, ValueError):
+        score = 0.5
+
+    reason_codes = []
+    metrics = _analysis_metrics(analysis, sql_output)
+    evidence_items = analysis.get("Evidence") or []
+    limitations = analysis.get("Limitations") or []
+    tables = _analysis_tables(analysis, sql_output)
+    evidence_errors = [item for item in evidence_items if item.get("status") != "ok"]
+    evidence_warnings = [
+        check
+        for item in evidence_items
+        for check in item.get("checks", [])
+        if check.get("status") == "warning"
+    ]
+    reviewed_join = _has_reviewed_join(analysis)
+    date_inferred = _date_range_was_inferred(analysis, sql_output)
+
+    if metrics:
+        _add_reason(
+            reason_codes,
+            "exact_metric_found",
+            "Exact metric found: " + ", ".join(metrics) + ".",
+        )
+    else:
+        _add_reason(
+            reason_codes,
+            "no_exact_metric",
+            "No exact semantic metric was selected for this answer.",
         )
 
-    limitations = [
-        "This sample schema is accounts-payable oriented; its 'revenue' metric is paid vendor invoice value, not customer revenue.",
-        "Causality is inferred from available invoice, vendor, status, and amount fields; external factors are not present in the database.",
+    if evidence_items and not evidence_errors:
+        _add_reason(
+            reason_codes,
+            "evidence_passed",
+            f"{len(evidence_items)} evidence query(s) completed successfully.",
+        )
+    elif evidence_errors:
+        _add_reason(
+            reason_codes,
+            "evidence_failed",
+            f"{len(evidence_errors)} evidence query(s) failed or were unavailable.",
+        )
+
+    if evidence_warnings:
+        _add_reason(
+            reason_codes,
+            "evidence_warning",
+            f"{len(evidence_warnings)} evidence check(s) returned a warning.",
+        )
+
+    if date_inferred:
+        _add_reason(
+            reason_codes,
+            "date_range_inferred",
+            "Date range was inferred from the question or available data.",
+        )
+        score = min(score, 0.79)
+
+    if len(tables) > 1 and reviewed_join:
+        _add_reason(
+            reason_codes,
+            "join_path_reviewed",
+            "Join path was reviewed across: " + ", ".join(tables[:4]) + ".",
+        )
+    elif len(tables) > 1:
+        _add_reason(
+            reason_codes,
+            "missing_join_path_review",
+            "No join path was reviewed for the selected tables.",
+        )
+        score = min(score, 0.54)
+    else:
+        _add_reason(
+            reason_codes,
+            "single_table_answer",
+            "No join path was needed for the selected table.",
+        )
+
+    if limitations:
+        _add_reason(
+            reason_codes,
+            "limitations_present",
+            f"{len(limitations)} limitation(s) apply to this answer.",
+        )
+
+    score = max(0.05, min(0.99, score))
+    level = _confidence_level(score)
+    lead_priority = [
+        "missing_join_path_review",
+        "evidence_failed",
+        "date_range_inferred",
+        "evidence_warning",
+        "limitations_present",
+        "exact_metric_found",
+        "evidence_passed",
+        "single_table_answer",
+        "no_exact_metric",
     ]
-    if period_comparison.get("status") == "ok":
-        current = period_comparison["current_period"]
-        previous = period_comparison["previous_period"]
-        if current.get("paid_invoice_count", 0) < 3 or previous.get("paid_invoice_count", 0) < 3:
-            limitations.append("The comparison period has very few paid invoices, so vendor-driver conclusions can be sensitive to one invoice.")
-
-    confidence = _confidence_for_analysis(evidence_items, period_comparison, limitations)
-    answer = _revenue_drop_answer(period_comparison, evidence_items)
-    next_query_evidence = _data_backed_next_questions_for_revenue_drop(
-        evidence_items,
-        period_comparison,
+    lead_reason = next(
+        (
+            reason["message"]
+            for code in lead_priority
+            for reason in reason_codes
+            if reason["code"] == code
+        ),
+        "Confidence is based on available evidence.",
     )
+    summary = f"{level.title()} confidence because {lead_reason[:1].lower()}{lead_reason[1:]}"
 
-    return {
-        "Analysis_Version": "ai_native_analysis_v1",
-        "Mode": "metric_driver_investigation",
-        "Question": user_question,
-        "Resolved_Question": sql_output.get("Resolved_Question") or user_question,
-        "Executive_Answer": answer,
-        "Clarification": {
-            "needed": False,
-            "question": sql_output.get("Clarification_Question") or sql_output.get("Followup_Questions"),
-            "decision": sql_output.get("Clarification_Decision"),
-            "handled_as_assumption": bool(sql_output.get("Requires_Clarification")),
-        },
-        "Assumptions": assumptions,
-        "Definitions": [metric] if metric else [],
-        "Period_Comparison": period_comparison,
-        "Anomalies": anomalies,
-        "Citations": {
-            "metrics": [metric] if metric else [],
-            "tables": cited_tables,
-            "columns": cited_columns,
-        },
-        "Evidence": evidence_items,
-        "Confidence": confidence,
-        "Limitations": limitations,
-        "Suggested_Next_Queries": [
-            item["question"] for item in next_query_evidence
-        ],
-        "Suggested_Next_Query_Evidence": next_query_evidence,
-        "SQL_Is_Supporting_Evidence": True,
+    confidence["score"] = _round_number(score, 2)
+    confidence["level"] = level
+    confidence["badge"] = level.title()
+    confidence["summary"] = summary.rstrip(".") + "."
+    confidence["reason_codes"] = reason_codes
+    analysis["Confidence"] = confidence
+    return analysis
+
+
+def _build_revenue_drop_analysis(user_question, sql_output, evidence_items, semantic_layer):
+    analysis = _build_planned_dataset_analysis(user_question, evidence_items, semantic_layer)
+    analysis["Mode"] = "metric_driver_investigation"
+    analysis["Resolved_Question"] = sql_output.get("Resolved_Question") or user_question
+    analysis["Clarification"] = {
+        "needed": False,
+        "question": sql_output.get("Clarification_Question") or sql_output.get("Followup_Questions"),
+        "decision": sql_output.get("Clarification_Decision"),
+        "handled_as_assumption": bool(sql_output.get("Requires_Clarification")),
     }
+    if sql_output.get("Assumptions"):
+        analysis.setdefault("Assumptions", []).append(sql_output.get("Assumptions"))
+    return _augment_confidence_reasons(analysis, semantic_layer, sql_output)
 
 
 def _generic_analysis_from_sql(user_question, sql_output, sql_result, generated_sql, semantic_layer):
@@ -1428,7 +1291,7 @@ def _generic_analysis_from_sql(user_question, sql_output, sql_result, generated_
         limitations,
     )
 
-    return {
+    analysis = {
         "Analysis_Version": "ai_native_analysis_v1",
         "Mode": "single_query_analysis",
         "Question": user_question,
@@ -1457,11 +1320,12 @@ def _generic_analysis_from_sql(user_question, sql_output, sql_result, generated_
         "Suggested_Next_Query_Evidence": [],
         "SQL_Is_Supporting_Evidence": True,
     }
+    return _augment_confidence_reasons(analysis, semantic_layer, sql_output)
 
 
 def _clarification_analysis(user_question, sql_output):
     question = sql_output.get("Clarification_Question") or sql_output.get("Followup_Questions")
-    return {
+    analysis = {
         "Analysis_Version": "ai_native_analysis_v1",
         "Mode": "clarification_required",
         "Question": user_question,
@@ -1492,6 +1356,7 @@ def _clarification_analysis(user_question, sql_output):
         "Suggested_Next_Query_Evidence": [],
         "SQL_Is_Supporting_Evidence": True,
     }
+    return _augment_confidence_reasons(analysis, sql_output=sql_output)
 
 
 def _analysis_synthesis_prompt(analysis):
@@ -1563,13 +1428,19 @@ def run_ai_native_analysis(
     thread_id=None,
     sql_runner=None,
     use_llm_synthesis=True,
+    answer_mode=DEFAULT_ANSWER_MODE,
 ):
     model_name = model_name or get_default_model_name()
     sql_runner = sql_runner or load_default_sql_runner()
+    answer_mode = normalize_answer_mode(answer_mode)
 
     with traced_span(
         "ai-native-analysis-workflow",
-        input={"user_question": user_question, "thread_id": thread_id},
+        input={
+            "user_question": user_question,
+            "thread_id": thread_id,
+            "answer_mode": answer_mode,
+        },
     ) as span:
         semantic_layer = load_json(str(SEMANTIC_LAYER_PATH))
         intent = infer_analysis_intent(user_question, semantic_layer)
@@ -1592,6 +1463,8 @@ def run_ai_native_analysis(
                 "Analysis_Mode": analysis.get("Mode"),
                 "Executive_Answer": analysis.get("Executive_Answer"),
             }
+            sql_output = apply_answer_mode_to_sql_output(sql_output, answer_mode)
+            analysis = sql_output["Analysis"]
             record_sql_execution_for_thread(thread_id, None)
             safe_update_observation(span, output={"sql_output": sql_output, "analysis": analysis})
             return {
@@ -1604,7 +1477,7 @@ def run_ai_native_analysis(
         if intent["mode"] == "planned_dataset_analysis":
             evidence_items = [
                 _run_evidence_query(query, sql_runner)
-                for query in build_dataset_analysis_plan()
+                for query in build_dataset_analysis_plan(semantic_layer)
             ]
             analysis = _build_planned_dataset_analysis(
                 user_question,
@@ -1619,6 +1492,8 @@ def run_ai_native_analysis(
                 "Analysis_Mode": analysis.get("Mode"),
                 "Executive_Answer": analysis.get("Executive_Answer"),
             }
+            sql_output = apply_answer_mode_to_sql_output(sql_output, answer_mode)
+            analysis = sql_output["Analysis"]
             record_sql_execution_for_thread(thread_id, None)
             safe_update_observation(span, output={"sql_output": sql_output, "analysis": analysis})
             return {
@@ -1633,6 +1508,7 @@ def run_ai_native_analysis(
             model_name=model_name,
             thread_id=thread_id,
         )
+        sql_output = apply_answer_mode_to_sql_output(sql_output, answer_mode)
 
         if (
             intent["mode"] != "metric_driver_investigation"
@@ -1640,6 +1516,8 @@ def run_ai_native_analysis(
         ):
             analysis = _clarification_analysis(user_question, sql_output)
             sql_output["Analysis"] = analysis
+            sql_output = apply_answer_mode_to_sql_output(sql_output, answer_mode)
+            analysis = sql_output["Analysis"]
             record_sql_execution_for_thread(thread_id, None)
             safe_update_observation(span, output={"sql_output": sql_output, "analysis": analysis})
             return {
@@ -1657,10 +1535,10 @@ def run_ai_native_analysis(
         else:
             record_sql_execution_for_thread(thread_id, None)
 
-        if intent["mode"] == "metric_driver_investigation" and intent["metric"] == "revenue":
+        if intent["mode"] == "metric_driver_investigation":
             evidence_items = [
                 _run_evidence_query(query, sql_runner)
-                for query in build_revenue_drop_evidence_queries()
+                for query in build_metric_driver_evidence_queries(intent.get("metric"), semantic_layer)
             ]
             analysis = _build_revenue_drop_analysis(
                 user_question,
@@ -1669,7 +1547,7 @@ def run_ai_native_analysis(
                 semantic_layer,
             )
             primary_result = (
-                _evidence_by_name(evidence_items, "period_comparison") or {}
+                evidence_items[0] if evidence_items else {}
             ).get("result_preview")
         else:
             analysis = _generic_analysis_from_sql(
@@ -1692,6 +1570,8 @@ def run_ai_native_analysis(
         if use_llm_synthesis:
             analysis = _try_llm_synthesis(analysis, model_name)
 
+        analysis = _augment_confidence_reasons(analysis, semantic_layer, sql_output)
+
         if analysis.get("Clarification", {}).get("handled_as_assumption"):
             sql_output["Original_Requires_Clarification"] = bool(sql_output.get("Requires_Clarification"))
             sql_output["Non_Blocking_Clarification_Question"] = (
@@ -1703,11 +1583,14 @@ def run_ai_native_analysis(
         sql_output["Analysis"] = analysis
         sql_output["Analysis_Mode"] = analysis.get("Mode")
         sql_output["Executive_Answer"] = analysis.get("Executive_Answer")
+        sql_output = apply_answer_mode_to_sql_output(sql_output, answer_mode)
+        analysis = sql_output["Analysis"]
 
         safe_update_observation(
             span,
             output={
                 "analysis_mode": analysis.get("Mode"),
+                "answer_mode": answer_mode,
                 "confidence": analysis.get("Confidence"),
                 "evidence_count": len(analysis.get("Evidence", [])),
                 "sql_output": sql_output,

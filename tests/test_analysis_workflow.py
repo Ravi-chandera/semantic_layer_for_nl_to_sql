@@ -12,8 +12,8 @@ class AnalysisWorkflowTests(unittest.TestCase):
         cls.semantic_layer = load_json(str(SEMANTIC_LAYER_PATH))
         cls.sql_runner = analysis_workflow.load_default_sql_runner()
 
-    def test_revenue_drop_question_builds_multi_evidence_analysis(self):
-        queries = analysis_workflow.build_revenue_drop_evidence_queries()
+    def test_metric_change_question_builds_semantic_layer_evidence_analysis(self):
+        queries = analysis_workflow.build_metric_driver_evidence_queries("revenue", self.semantic_layer)
         evidence = [
             analysis_workflow._run_evidence_query(query, self.sql_runner)
             for query in queries
@@ -33,39 +33,20 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.assertEqual(analysis["Mode"], "metric_driver_investigation")
         self.assertTrue(analysis["SQL_Is_Supporting_Evidence"])
         self.assertGreaterEqual(len(analysis["Assumptions"]), 3)
-        self.assertIn("Period_Comparison", analysis)
 
         evidence_names = {item["name"] for item in analysis["Evidence"]}
-        self.assertIn("period_comparison", evidence_names)
-        self.assertIn("vendor_drivers", evidence_names)
-        self.assertIn("monthly_trend", evidence_names)
+        self.assertIn("dataset_row_counts", evidence_names)
         self.assertTrue(all(item["status"] == "ok" for item in analysis["Evidence"]))
 
         cited_tables = {item["table"] for item in analysis["Citations"]["tables"]}
-        cited_columns = {item["column"] for item in analysis["Citations"]["columns"]}
         self.assertIn("invoices", cited_tables)
-        self.assertIn("vendors", cited_tables)
-        self.assertIn("invoices.grand_total", cited_columns)
-        self.assertIn("invoices.invoice_date", cited_columns)
-        self.assertIn("invoices.status", cited_columns)
 
         self.assertIn("level", analysis["Confidence"])
-        self.assertGreaterEqual(len(analysis["Suggested_Next_Queries"]), 3)
-        self.assertEqual(
-            len(analysis["Suggested_Next_Queries"]),
-            len(analysis["Suggested_Next_Query_Evidence"]),
-        )
-        for suggestion in analysis["Suggested_Next_Query_Evidence"]:
-            self.assertIn("question", suggestion)
-            self.assertIn("source_evidence", suggestion)
-            self.assertIn("supporting_facts", suggestion)
-            self.assertIn(
-                suggestion["source_evidence"],
-                {"vendor_drivers", "status_mix", "period_comparison"},
-            )
-
-        suggestion_text = " ".join(analysis["Suggested_Next_Queries"]).lower()
-        self.assertNotIn("department", suggestion_text)
+        confidence_codes = {
+            reason["code"] for reason in analysis["Confidence"]["reason_codes"]
+        }
+        self.assertIn("exact_metric_found", confidence_codes)
+        self.assertGreaterEqual(len(analysis["Suggested_Next_Queries"]), 1)
 
     def test_what_can_i_ask_returns_data_overview_without_sql_generation(self):
         original_generator = analysis_workflow.generate_sql_for_question
@@ -98,7 +79,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.assertGreaterEqual(len(overview["example_questions"]), 5)
 
         examples = " ".join(overview["example_questions"]).lower()
-        self.assertIn("vendor", examples)
+        self.assertIn("records", examples)
         self.assertNotIn("customer churn", examples)
 
     def test_full_analysis_builds_and_runs_multi_question_plan(self):
@@ -127,9 +108,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
 
         plan_text = " ".join(item["question"] for item in analysis["Analysis_Plan"]).lower()
         self.assertIn("invoice", plan_text)
-        self.assertIn("vendor", plan_text)
         self.assertIn("purchase", plan_text)
-        self.assertIn("rejection", plan_text)
         self.assertNotIn("customer churn", plan_text)
 
         evidence_tables = {
@@ -138,7 +117,6 @@ class AnalysisWorkflowTests(unittest.TestCase):
             for table in item.get("tables", [])
         }
         self.assertIn("invoices", evidence_tables)
-        self.assertIn("vendors", evidence_tables)
         self.assertIn("purchase_orders", evidence_tables)
 
     def test_evidence_sql_safety_reports_non_read_and_missing_table_errors(self):
@@ -219,6 +197,73 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.assertIn("No executable SQL", analysis["Evidence"][0]["error"])
         self.assertIn("did not return executable SQL", analysis["Limitations"][0])
 
+    def test_confidence_reasons_lower_multi_table_answer_without_join_review(self):
+        analysis = {
+            "Confidence": {"level": "high", "score": 0.91, "reasons": []},
+            "Definitions": [{"metric": "total_spend"}],
+            "Evidence": [
+                {
+                    "status": "ok",
+                    "tables": ["invoices"],
+                    "checks": [],
+                    "sql": "SELECT COUNT(*) FROM invoices",
+                    "metric": "total_spend",
+                }
+            ],
+            "Citations": {
+                "tables": [{"table": "invoices"}, {"table": "vendors"}],
+            },
+            "Assumptions": [],
+            "Limitations": [],
+        }
+
+        augmented = analysis_workflow._augment_confidence_reasons(
+            analysis,
+            self.semantic_layer,
+            {"Selected_Tables": ["invoices", "vendors"], "Selected_Metrics": ["total_spend"]},
+        )
+
+        reason_codes = {
+            reason["code"] for reason in augmented["Confidence"]["reason_codes"]
+        }
+        self.assertIn("missing_join_path_review", reason_codes)
+        self.assertEqual(augmented["Confidence"]["level"], "low")
+        self.assertLessEqual(augmented["Confidence"]["score"], 0.54)
+        self.assertIn("no join path was reviewed", augmented["Confidence"]["summary"])
+
+    def test_confidence_reasons_keep_exact_metric_and_join_as_high(self):
+        analysis = {
+            "Confidence": {"level": "high", "score": 0.91, "reasons": []},
+            "Definitions": [{"metric": "revenue"}],
+            "Evidence": [
+                {
+                    "status": "ok",
+                    "tables": ["invoices", "vendors"],
+                    "checks": [],
+                    "sql": "SELECT v.name FROM invoices i JOIN vendors v ON i.vendor_id = v.id",
+                    "metric": "revenue",
+                }
+            ],
+            "Citations": {
+                "tables": [{"table": "invoices"}, {"table": "vendors"}],
+            },
+            "Assumptions": [],
+            "Limitations": [],
+        }
+
+        augmented = analysis_workflow._augment_confidence_reasons(
+            analysis,
+            self.semantic_layer,
+            {"Selected_Tables": ["invoices", "vendors"], "Selected_Metrics": ["revenue"]},
+        )
+
+        reason_codes = {
+            reason["code"] for reason in augmented["Confidence"]["reason_codes"]
+        }
+        self.assertIn("exact_metric_found", reason_codes)
+        self.assertIn("join_path_reviewed", reason_codes)
+        self.assertEqual(augmented["Confidence"]["level"], "high")
+
     def test_revenue_drop_workflow_treats_optional_breakdown_clarification_as_assumption(self):
         original_generator = analysis_workflow.generate_sql_for_question
 
@@ -256,7 +301,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.assertTrue(analysis["Clarification"]["handled_as_assumption"])
         self.assertFalse(result["sql_output"]["Requires_Clarification"])
         self.assertTrue(result["sql_output"]["Original_Requires_Clarification"])
-        self.assertGreaterEqual(len(analysis["Evidence"]), 4)
+        self.assertGreaterEqual(len(analysis["Evidence"]), 2)
         self.assertTrue(all(item["status"] == "ok" for item in analysis["Evidence"]))
 
     def test_llm_synthesis_cannot_replace_data_backed_next_queries(self):
@@ -268,13 +313,13 @@ class AnalysisWorkflowTests(unittest.TestCase):
             "Limitations": ["Original limitation."],
             "Evidence": [],
             "Suggested_Next_Queries": [
-                "Show paid invoices for OmniTech Hardware in 2025-12 and 2026-01."
+                "Show the strongest metric driver in the latest period."
             ],
             "Suggested_Next_Query_Evidence": [
                 {
-                    "question": "Show paid invoices for OmniTech Hardware in 2025-12 and 2026-01.",
-                    "source_evidence": "vendor_drivers",
-                    "supporting_facts": {"vendor_name": "OmniTech Hardware"},
+                    "question": "Show the strongest metric driver in the latest period.",
+                    "source_evidence": "semantic_layer_plan",
+                    "supporting_facts": {"metric": "revenue"},
                 }
             ],
         }
@@ -302,11 +347,11 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.assertEqual(synthesized["Executive_Answer"], "Synthesized answer.")
         self.assertEqual(
             synthesized["Suggested_Next_Queries"],
-            ["Show paid invoices for OmniTech Hardware in 2025-12 and 2026-01."],
+            ["Show the strongest metric driver in the latest period."],
         )
         self.assertEqual(
             synthesized["Suggested_Next_Query_Evidence"][0]["source_evidence"],
-            "vendor_drivers",
+            "semantic_layer_plan",
         )
 
 

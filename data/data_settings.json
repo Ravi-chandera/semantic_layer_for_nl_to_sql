@@ -1,0 +1,17 @@
+{
+  "default_currency": "INR",
+  "fiscal_year_start": {
+    "month": 4,
+    "day": 1
+  },
+  "timezone": "Asia/Kolkata",
+  "today_anchor": "2026-05-16",
+  "month_definition": "calendar",
+  "quarter_definition": "fiscal",
+  "display_format": {
+    "currency": "code",
+    "date": "%Y-%m-%d",
+    "month": "%Y-%m",
+    "decimal_places": 2
+  }
+}

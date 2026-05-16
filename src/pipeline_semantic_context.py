@@ -3,9 +3,20 @@ import logging
 import re
 from collections import deque
 
+try:
+    from .data_settings import build_settings_context, data_settings_mtime_ns, load_data_settings
+    from .feedback_store import build_semantic_correction_context
+except ImportError:
+    from data_settings import build_settings_context, data_settings_mtime_ns, load_data_settings
+    from feedback_store import build_semantic_correction_context
+
 
 logger = logging.getLogger(__name__)
 _SQL_CONTEXT_CACHE = {}
+
+
+def clear_sql_context_cache():
+    _SQL_CONTEXT_CACHE.clear()
 
 
 def build_router_tables(semantic_layer):
@@ -93,10 +104,73 @@ def find_required_clarification_rule(semantic_layer, selected_tables, question):
                 "name": rule_name,
                 "rule": rule,
                 "clarifying_question": rule.get("clarification_question"),
+                "options": clarification_options_from_rule(rule_name, rule),
                 "reason": rule.get("reason") or f"Matched semantic ambiguity rule: {rule_name}.",
             }
 
     return None
+
+
+def _humanize_dimension_label(label):
+    return str(label or "").replace("_", " ").strip()
+
+
+def _title_label(label):
+    return _humanize_dimension_label(label).title()
+
+
+def _default_option_label(rule_name, label):
+    lower_name = str(rule_name or "").lower()
+    human_label = _humanize_dimension_label(label)
+
+    if "top" in lower_name or "rank" in lower_name:
+        return f"Rank by {human_label}"
+
+    return f"Use {_title_label(label)}"
+
+
+def _default_resolution_text(rule_name, label):
+    lower_name = str(rule_name or "").lower()
+    human_label = _humanize_dimension_label(label)
+
+    if "top" in lower_name or "rank" in lower_name:
+        return f"Rank by {human_label}."
+
+    return f"Use {human_label}."
+
+
+def clarification_options_from_rule(rule_name, rule):
+    options = []
+
+    for index, dimension in enumerate(rule.get("ambiguous_dimensions") or []):
+        if not isinstance(dimension, dict):
+            continue
+
+        label = dimension.get("label")
+        if not label:
+            continue
+
+        resolution_text = (
+            dimension.get("resolution_text")
+            or dimension.get("resolved_text")
+            or _default_resolution_text(rule_name, label)
+        )
+        option = {
+            "id": dimension.get("id") or str(label),
+            "label": dimension.get("display_label") or _default_option_label(rule_name, label),
+            "resolution_text": resolution_text,
+            "detail": dimension.get("detail") or dimension.get("description") or dimension.get("sql_hint"),
+            "sql_hint": dimension.get("sql_hint"),
+            "is_default": bool(
+                dimension.get("is_default")
+                or rule.get("default_assumption") == label
+                or (rule.get("default_assumption") and rule.get("default_assumption") == dimension.get("id"))
+            ),
+            "position": index,
+        }
+        options.append(option)
+
+    return options
 
 
 def metric_source_tables(selected_metrics, semantic_layer):
@@ -218,11 +292,16 @@ def filter_join_paths_for_tables(selected_tables, semantic_layer):
     return filtered_join_paths
 
 
-def build_sql_context(selected_tables, selected_metrics, semantic_layer):
+def build_sql_context(selected_tables, selected_metrics, semantic_layer, data_settings=None):
+    if data_settings is None:
+        data_settings = load_data_settings()
+
     cache_key = (
         id(semantic_layer),
         tuple(selected_tables),
         tuple(selected_metrics),
+        data_settings_mtime_ns(),
+        json.dumps(data_settings, sort_keys=True),
     )
     if cache_key in _SQL_CONTEXT_CACHE:
         return _SQL_CONTEXT_CACHE[cache_key]
@@ -242,6 +321,11 @@ def build_sql_context(selected_tables, selected_metrics, semantic_layer):
     if metric_context:
         context.append(f"metrics: {json.dumps(metric_context, indent=2)}")
 
+    context.append(
+        "global_data_settings: "
+        + json.dumps(build_settings_context(data_settings), indent=2)
+    )
+
     join_path_context = filter_join_paths_for_tables(selected_tables, semantic_layer)
     if join_path_context:
         context.append(f"join_paths: {json.dumps(join_path_context, indent=2)}")
@@ -253,6 +337,18 @@ def build_sql_context(selected_tables, selected_metrics, semantic_layer):
         if key in semantic_layer:
             context.append(f"{key}: {json.dumps(semantic_layer[key], indent=2)}")
 
+    try:
+        correction_context = build_semantic_correction_context(
+            selected_tables=selected_tables,
+            selected_metrics=selected_metrics,
+        )
+    except Exception as e:
+        logger.warning("Could not load semantic correction context: %s", e)
+        correction_context = {}
+
+    if correction_context:
+        context.append(f"semantic_corrections: {json.dumps(correction_context, indent=2)}")
+
     sql_context = "\n\n".join(context)
     _SQL_CONTEXT_CACHE[cache_key] = sql_context
     return sql_context
@@ -261,8 +357,24 @@ def build_sql_context(selected_tables, selected_metrics, semantic_layer):
 def pick_display_column(table_info):
     columns = table_info.get("columns", {})
 
-    for column_name in ("name", "invoice_number", "po_number", "grn_number", "code", "reference_number"):
-        if column_name in columns:
+    preferred_names = (
+        "name",
+        "title",
+        "label",
+        "code",
+        "number",
+        "reference_number",
+        "reference",
+    )
+    for column_name in preferred_names:
+        if column_name in columns and not columns[column_name].get("is_sensitive"):
+            return column_name
+
+    for column_name, column_info in columns.items():
+        column_type = str(column_info.get("type") or "").upper()
+        if column_info.get("is_sensitive"):
+            continue
+        if any(part in column_type for part in ("CHAR", "TEXT", "CLOB", "VARCHAR")):
             return column_name
 
     return None
@@ -277,11 +389,7 @@ def singularize_table_name(table_name):
 
 
 def entity_alias_for_table(table_name):
-    return {
-        "purchase_orders": "po",
-        "invoices": "invoice",
-        "grns": "grn",
-    }.get(table_name, singularize_table_name(table_name))
+    return singularize_table_name(table_name)
 
 
 def label_alias_for_entity(entity_name, display_column):

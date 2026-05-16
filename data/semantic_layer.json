@@ -1059,49 +1059,79 @@
     "total_spend": {
       "description": "Total amount paid to all vendors.",
       "sql": "SUM(payments.amount)",
+      "formula": "SUM(payments.amount)",
       "filters": null,
       "synonyms": ["total payments", "cash outflow"],
       "result_unit": "INR",
+      "unit": "INR",
+      "owner": "Finance",
+      "examples": ["total spend this month", "cash outflow by vendor"],
+      "ambiguity_rules": "Use payments.amount for cash actually paid; use total_liability for unpaid invoice exposure.",
       "tables": ["payments"]
     },
     "total_liability": {
       "description": "Total amount of all unpaid or pending invoices.",
       "sql": "SUM(invoices.grand_total)",
+      "formula": "SUM(invoices.grand_total)",
       "filters": "invoices.status IN ('approved','validated','on_hold','partially_paid','received')",
       "synonyms": ["outstanding", "outstanding balance", "accounts payable", "unpaid amount"],
       "result_unit": "INR",
+      "unit": "INR",
+      "owner": "Finance",
+      "examples": ["outstanding invoices", "accounts payable by vendor"],
+      "ambiguity_rules": "Outstanding means invoices not fully paid; exclude invoices with status = 'paid'.",
       "tables": ["invoices"]
     },
     "revenue": {
       "description": "Total value of paid invoices.",
       "sql": "SUM(invoices.grand_total)",
+      "formula": "SUM(invoices.grand_total)",
       "filters": "invoices.status = 'paid'",
       "synonyms": ["paid invoice value", "realized invoice value", "paid bills"],
       "result_unit": "INR",
+      "unit": "INR",
+      "owner": "Finance",
+      "examples": ["revenue last quarter", "paid invoice value by vendor"],
+      "ambiguity_rules": "Revenue is defined as paid invoice grand_total in this sample AP dataset; unpaid invoices belong to total_liability.",
       "tables": ["invoices"]
     },
     "average_invoice_value": {
       "description": "The mean total of vendor bills.",
       "sql": "AVG(invoices.grand_total)",
+      "formula": "AVG(invoices.grand_total)",
       "filters": null,
       "synonyms": ["mean bill size"],
       "result_unit": "INR",
+      "unit": "INR",
+      "owner": "Finance",
+      "examples": ["average invoice value", "mean bill size by month"],
+      "ambiguity_rules": "Uses invoices.grand_total including tax unless the user asks for taxable amount.",
       "tables": ["invoices"]
     },
     "rejection_rate": {
       "description": "Percentage of received goods that were rejected.",
       "sql": "SUM(grn_line_items.quantity_rejected) * 100.0 / NULLIF(SUM(grn_line_items.quantity_received + grn_line_items.quantity_rejected), 0)",
+      "formula": "SUM(grn_line_items.quantity_rejected) * 100.0 / NULLIF(SUM(grn_line_items.quantity_received + grn_line_items.quantity_rejected), 0)",
       "filters": null,
       "synonyms": ["defect rate", "return percentage"],
       "result_unit": "percentage",
+      "unit": "percentage",
+      "owner": "Operations",
+      "examples": ["rejection rate by product", "defect rate last month"],
+      "ambiguity_rules": "Denominator is accepted plus rejected receipt quantity; do not use invoice quantity.",
       "tables": ["grn_line_items"]
     },
     "order_fulfillment_count": {
       "description": "Number of closed purchase orders.",
       "sql": "COUNT(purchase_orders.id)",
+      "formula": "COUNT(purchase_orders.id)",
       "filters": "purchase_orders.status = 'closed'",
       "synonyms": ["completed orders"],
       "result_unit": "count",
+      "unit": "count",
+      "owner": "Procurement",
+      "examples": ["completed orders this quarter", "order fulfillment count by department"],
+      "ambiguity_rules": "Counts purchase orders with status = 'closed'; partially received orders are not fulfilled.",
       "tables": ["purchase_orders"]
     }
   },
@@ -1232,18 +1262,30 @@
       "ambiguous_dimensions": [
         {
           "label": "invoice_value",
+          "display_label": "Rank by invoice value",
+          "resolution_text": "Rank top vendors by total invoice value.",
+          "detail": "Uses SUM(invoices.grand_total) grouped by vendor.",
           "sql_hint": "SUM(invoices.grand_total) grouped by vendors.id"
         },
         {
           "label": "invoice_count",
+          "display_label": "Rank by count",
+          "resolution_text": "Rank top vendors by invoice count.",
+          "detail": "Uses COUNT(invoices.id) grouped by vendor.",
           "sql_hint": "COUNT(invoices.id) grouped by vendors.id"
         },
         {
           "label": "vendor_rating",
+          "display_label": "Rank by vendor rating",
+          "resolution_text": "Rank top vendors by vendor rating.",
+          "detail": "Uses vendors.rating.",
           "sql_hint": "vendors.rating"
         },
         {
           "label": "payment_value",
+          "display_label": "Rank by payment value",
+          "resolution_text": "Rank top vendors by payment value.",
+          "detail": "Uses SUM(payments.amount) grouped by vendor through invoices.",
           "sql_hint": "SUM(payments.amount) grouped by vendors.id through invoices"
         }
       ],

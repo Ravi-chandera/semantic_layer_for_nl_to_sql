@@ -33,6 +33,7 @@ def build_sql_response(
     clarification_question=None,
     clarification_attempts=0,
     clarification_limit_reached=False,
+    clarification_options=None,
 ):
     return {
         "SQL": sql,
@@ -44,6 +45,7 @@ def build_sql_response(
         "Clarification_Question": clarification_question,
         "Clarification_Attempts": clarification_attempts,
         "Clarification_Limit_Reached": clarification_limit_reached,
+        "Clarification_Options": clarification_options or [],
     }
 
 
@@ -53,14 +55,18 @@ def no_valid_tables_response():
         explanation="No valid database table was selected for this question.",
         assumptions="The router did not map the question to any table present in the semantic layer.",
         followup_questions=(
-            "Can you rephrase the question using available business entities like invoices, "
-            "payments, vendors, purchase orders, products, departments, companies, GRNs, "
-            "or approval matrix?"
+            "Can you rephrase the question using an entity, metric, status, date, or category "
+            "that exists in the active dataset?"
         ),
     )
 
 
-def clarification_needed_response(clarifying_question, clarification_attempts=1, reason=None):
+def clarification_needed_response(
+    clarifying_question,
+    clarification_attempts=1,
+    reason=None,
+    clarification_options=None,
+):
     return build_sql_response(
         sql=None,
         explanation=reason or "The question needs one more business detail before SQL can be generated safely.",
@@ -69,6 +75,7 @@ def clarification_needed_response(clarifying_question, clarification_attempts=1,
         requires_clarification=True,
         clarification_question=clarifying_question,
         clarification_attempts=clarification_attempts,
+        clarification_options=clarification_options,
     )
 
 

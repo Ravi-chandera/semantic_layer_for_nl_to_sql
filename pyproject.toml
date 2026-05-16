@@ -1,7 +1,7 @@
 [project]
 name = "semantic-layer-for-nl-to-sql"
 version = "0.1.0"
-description = "AP investigation analyst copilot that maps natural-language accounts-payable questions to governed SQLite SQL."
+description = "Generic data investigation copilot that maps natural-language questions to governed SQLite SQL."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
